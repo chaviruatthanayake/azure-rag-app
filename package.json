@@ -1,0 +1,34 @@
+{
+  "name": "azure-rag-app",
+  "version": "1.0.0",
+  "description": "RAG application with Azure AI Foundry and OpenAI",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["rag", "azure", "openai", "ai-foundry"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "multer": "^1.4.5-lts.1",
+    "@azure/storage-blob": "^12.17.0",
+    "@azure/openai": "^1.0.0-beta.11",
+    "@azure/search-documents": "^12.0.0",
+    "@azure/ai-form-recognizer": "^5.0.0",
+    "@azure/keyvault-secrets": "^4.7.0",
+    "@azure/identity": "^4.0.0",
+    "langchain": "^0.1.0",
+    "axios": "^1.6.2",
+    "uuid": "^9.0.1",
+    "pdf-parse": "^1.1.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
