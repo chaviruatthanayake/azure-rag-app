@@ -1,6 +1,7 @@
 import { docIntelligenceClient, containerClient } from '../config/azureClients.js';
 import { v4 as uuidv4 } from 'uuid';
 import mammoth from 'mammoth';
+import * as XLSX from 'xlsx';
 
 
 export class DocumentProcessor {
@@ -36,95 +37,120 @@ export class DocumentProcessor {
     /**
    * Extract text from document (PDF via Azure DI, DOCX via local parser)
    */
+    /**
+   * Extract text from document (PDF, DOCX, XLSX, images)
+   */
   async extractText(fileBuffer, fileType) {
     try {
       console.log(`📄 Extracting text from ${fileType}...`);
 
-      // 1) Handle DOCX locally using mammoth (avoids DI "InvalidContent" issues)
-      if (fileType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-        const { value } = await mammoth.extractRawText({ buffer: fileBuffer });
-
-        const extractedText = (value || '').trim();
-        console.log(`✅ Extracted ${extractedText.length} characters from DOCX via mammoth`);
-
-        return {
-          text: extractedText,
-          tables: [],          // mammoth doesn't parse tables structurally here
-          pageCount: 0         // DOCX has no page concept without rendering; set 0 or 1
-        };
-      }
-
-      // 2) Default: use Azure Document Intelligence (PDFs, others)
-      const poller = await docIntelligenceClient.beginAnalyzeDocument(
-        'prebuilt-document',
-        fileBuffer,
-        {
-          // send as generic binary stream; DI detects PDF, images, etc.
-          contentType: 'application/octet-stream'
-        }
-      );
-
-      const result = await poller.pollUntilDone();
-
       let extractedText = '';
       let tables = [];
+      let pageCount = 0;
 
-      // Extract paragraphs
-      if (result.paragraphs) {
-        extractedText = result.paragraphs.map(p => p.content).join('\n\n');
+      // 1️⃣ DOCX → use mammoth (works well)
+      if (fileType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        console.log('📝 Using mammoth to extract DOCX');
+        const result = await mammoth.extractRawText({ buffer: fileBuffer });
+        extractedText = result.value || '';
+        pageCount = 1; // mammoth doesn’t give pages, we just set 1
       }
 
-      // Extract tables (keep your existing logic)
-      if (result.tables) {
-        tables = result.tables.map(table => {
-          const rows = [];
-          let currentRow = [];
-          let currentRowIndex = -1;
+      // 2️⃣ XLSX → use xlsx library
+      else if (fileType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+        console.log('📊 Using xlsx to extract EXCEL');
+        const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
 
-          table.cells.forEach(cell => {
-            if (cell.rowIndex !== currentRowIndex) {
-              if (currentRow.length > 0) {
-                rows.push(currentRow);
+        workbook.SheetNames.forEach((sheetName, idx) => {
+          const sheet = workbook.Sheets[sheetName];
+          if (!sheet) return;
+
+          const csv = XLSX.utils.sheet_to_csv(sheet);
+          if (csv.trim().length === 0) return;
+
+          extractedText += `\n\n=== Sheet ${idx + 1}: ${sheetName} ===\n`;
+          extractedText += csv;
+        });
+
+        pageCount = workbook.SheetNames.length;
+      }
+
+      // 3️⃣ PDF + images → Azure Document Intelligence
+      else if (
+        fileType === 'application/pdf' ||
+        fileType.startsWith('image/')
+      ) {
+        console.log('🧠 Using Azure Document Intelligence for PDF/image');
+        const poller = await docIntelligenceClient.beginAnalyzeDocument(
+          'prebuilt-document',
+          fileBuffer,
+          { contentType: fileType }
+        );
+
+        const result = await poller.pollUntilDone();
+
+        // paragraphs -> text
+        if (result.paragraphs) {
+          extractedText = result.paragraphs.map(p => p.content).join('\n\n');
+        }
+
+        // tables -> append as text
+        if (result.tables) {
+          tables = result.tables.map(table => {
+            const rows = [];
+            let currentRow = [];
+            let currentRowIndex = -1;
+
+            table.cells.forEach(cell => {
+              if (cell.rowIndex !== currentRowIndex) {
+                if (currentRow.length > 0) {
+                  rows.push(currentRow);
+                }
+                currentRow = [];
+                currentRowIndex = cell.rowIndex;
               }
-              currentRow = [];
-              currentRowIndex = cell.rowIndex;
+              currentRow.push(cell.content);
+            });
+
+            if (currentRow.length > 0) {
+              rows.push(currentRow);
             }
-            currentRow.push(cell.content);
+
+            return {
+              rowCount: table.rowCount,
+              columnCount: table.columnCount,
+              cells: rows
+            };
           });
 
-          if (currentRow.length > 0) {
-            rows.push(currentRow);
-          }
-
-          return {
-            rowCount: table.rowCount,
-            columnCount: table.columnCount,
-            cells: rows
-          };
-        });
-
-        tables.forEach((table, index) => {
-          extractedText += `\n\n=== Table ${index + 1} ===\n`;
-          table.cells.forEach(row => {
-            extractedText += row.join(' | ') + '\n';
+          tables.forEach((table, index) => {
+            extractedText += `\n\n=== Table ${index + 1} ===\n`;
+            table.cells.forEach(row => {
+              extractedText += row.join(' | ') + '\n';
+            });
           });
-        });
+        }
+
+        pageCount = result.pages ? result.pages.length : 0;
       }
 
-      console.log(`✅ Extracted ${extractedText.length} characters from document via Azure DI`);
+      // 4️⃣ Unsupported format
+      else {
+        throw new Error(`Unsupported file type: ${fileType}`);
+      }
+
+      console.log(`✅ Extracted ${extractedText.length} characters from document`);
 
       return {
         text: extractedText,
         tables,
-        pageCount: result.pages ? result.pages.length : 0
+        pageCount
       };
     } catch (error) {
       console.error('Error extracting text:', error);
       throw error;
     }
   }
-
-
 
   /**
    * Chunk text into smaller pieces for embedding
