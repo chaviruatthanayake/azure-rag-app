@@ -1,5 +1,7 @@
 import { docIntelligenceClient, containerClient } from '../config/azureClients.js';
 import { v4 as uuidv4 } from 'uuid';
+import mammoth from 'mammoth';
+
 
 export class DocumentProcessor {
   
@@ -31,78 +33,97 @@ export class DocumentProcessor {
   /**
    * Extract text from document using Azure Document Intelligence
    */
+    /**
+   * Extract text from document (PDF via Azure DI, DOCX via local parser)
+   */
   async extractText(fileBuffer, fileType) {
-  try {
-    console.log(`📄 Extracting text from ${fileType}...`);
-    
-    // Call Document Intelligence with the raw file bytes (no URL needed)
-    const poller = await docIntelligenceClient.beginAnalyzeDocument(
-      'prebuilt-document',
-      fileBuffer,
-      {
-        contentType: fileType
-      }
-    );
+    try {
+      console.log(`📄 Extracting text from ${fileType}...`);
 
-    const result = await poller.pollUntilDone();
-    
-    let extractedText = '';
-    let tables = [];
+      // 1) Handle DOCX locally using mammoth (avoids DI "InvalidContent" issues)
+      if (fileType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        const { value } = await mammoth.extractRawText({ buffer: fileBuffer });
 
-    // Extract paragraphs
-    if (result.paragraphs) {
-      extractedText = result.paragraphs.map(p => p.content).join('\n\n');
-    }
-
-    // Extract tables (keep your existing logic)
-    if (result.tables) {
-      tables = result.tables.map(table => {
-        const rows = [];
-        let currentRow = [];
-        let currentRowIndex = -1;
-
-        table.cells.forEach(cell => {
-          if (cell.rowIndex !== currentRowIndex) {
-            if (currentRow.length > 0) {
-              rows.push(currentRow);
-            }
-            currentRow = [];
-            currentRowIndex = cell.rowIndex;
-          }
-          currentRow.push(cell.content);
-        });
-
-        if (currentRow.length > 0) {
-          rows.push(currentRow);
-        }
+        const extractedText = (value || '').trim();
+        console.log(`✅ Extracted ${extractedText.length} characters from DOCX via mammoth`);
 
         return {
-          rowCount: table.rowCount,
-          columnCount: table.columnCount,
-          cells: rows
+          text: extractedText,
+          tables: [],          // mammoth doesn't parse tables structurally here
+          pageCount: 0         // DOCX has no page concept without rendering; set 0 or 1
         };
-      });
+      }
 
-      tables.forEach((table, index) => {
-        extractedText += `\n\n=== Table ${index + 1} ===\n`;
-        table.cells.forEach(row => {
-          extractedText += row.join(' | ') + '\n';
+      // 2) Default: use Azure Document Intelligence (PDFs, others)
+      const poller = await docIntelligenceClient.beginAnalyzeDocument(
+        'prebuilt-document',
+        fileBuffer,
+        {
+          // send as generic binary stream; DI detects PDF, images, etc.
+          contentType: 'application/octet-stream'
+        }
+      );
+
+      const result = await poller.pollUntilDone();
+
+      let extractedText = '';
+      let tables = [];
+
+      // Extract paragraphs
+      if (result.paragraphs) {
+        extractedText = result.paragraphs.map(p => p.content).join('\n\n');
+      }
+
+      // Extract tables (keep your existing logic)
+      if (result.tables) {
+        tables = result.tables.map(table => {
+          const rows = [];
+          let currentRow = [];
+          let currentRowIndex = -1;
+
+          table.cells.forEach(cell => {
+            if (cell.rowIndex !== currentRowIndex) {
+              if (currentRow.length > 0) {
+                rows.push(currentRow);
+              }
+              currentRow = [];
+              currentRowIndex = cell.rowIndex;
+            }
+            currentRow.push(cell.content);
+          });
+
+          if (currentRow.length > 0) {
+            rows.push(currentRow);
+          }
+
+          return {
+            rowCount: table.rowCount,
+            columnCount: table.columnCount,
+            cells: rows
+          };
         });
-      });
-    }
 
-    console.log(`✅ Extracted ${extractedText.length} characters from document`);
-    
-    return {
-      text: extractedText,
-      tables,
-      pageCount: result.pages ? result.pages.length : 0
-    };
-  } catch (error) {
-    console.error('Error extracting text:', error);
-    throw error;
+        tables.forEach((table, index) => {
+          extractedText += `\n\n=== Table ${index + 1} ===\n`;
+          table.cells.forEach(row => {
+            extractedText += row.join(' | ') + '\n';
+          });
+        });
+      }
+
+      console.log(`✅ Extracted ${extractedText.length} characters from document via Azure DI`);
+
+      return {
+        text: extractedText,
+        tables,
+        pageCount: result.pages ? result.pages.length : 0
+      };
+    } catch (error) {
+      console.error('Error extracting text:', error);
+      throw error;
+    }
   }
-}
+
 
 
   /**
