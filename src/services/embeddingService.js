@@ -1,68 +1,46 @@
-import { openAIClient } from '../config/azureClients.js';
+import { OpenAIClient, AzureKeyCredential } from '@azure/openai';
 
-export class EmbeddingService {
+// Initialize Azure OpenAI for embeddings only
+const openaiClient = new OpenAIClient(
+  process.env.AZURE_OPENAI_ENDPOINT,
+  new AzureKeyCredential(process.env.AZURE_OPENAI_API_KEY)
+);
+
+class EmbeddingService {
   
   /**
-   * Generate embeddings for a single text
-   */
-  async generateEmbedding(text) {
-    try {
-      const response = await openAIClient.embeddings.create({
-        input: text,
-        model: process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
-      });
-
-      return response.data[0].embedding;
-    } catch (error) {
-      console.error('Error generating embedding:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Generate embeddings for multiple texts (batch)
+   * Generate embeddings using Azure OpenAI (to match existing 1536-dim index)
    */
   async generateEmbeddings(texts) {
     try {
-      console.log(`🔄 Generating embeddings for ${texts.length} texts...`);
-      
-      // Azure OpenAI has a limit of 16 texts per request
-      const batchSize = 16;
-      const embeddings = [];
-
-      for (let i = 0; i < texts.length; i += batchSize) {
-        const batch = texts.slice(i, i + batchSize);
-        const response = await openAIClient.embeddings.create({
-          input: batch,
-          model: process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
-        });
-
-        embeddings.push(...response.data.map(d => d.embedding));
+      // Ensure texts is an array
+      if (!Array.isArray(texts)) {
+        texts = [texts];
       }
 
-      console.log(`✅ Generated ${embeddings.length} embeddings`);
+      console.log(`🔄 Generating embeddings for ${texts.length} texts using Azure OpenAI...`);
+
+      const deploymentName = process.env.AZURE_OPENAI_EMBEDDING_DEPLOYMENT || 'text-embedding-ada-002';
+
+      const response = await openaiClient.getEmbeddings(deploymentName, texts);
+
+      const embeddings = response.data.map(item => item.embedding);
+
+      console.log(`✅ Generated ${embeddings.length} embeddings (dimension: ${embeddings[0].length})`);
       return embeddings;
+
     } catch (error) {
-      console.error('Error generating embeddings:', error);
-      throw error;
+      console.error('Error generating embeddings with Azure OpenAI:', error);
+      throw new Error(`Failed to generate embeddings: ${error.message}`);
     }
   }
 
   /**
-   * Calculate cosine similarity between two embeddings
+   * Generate single embedding
    */
-  cosineSimilarity(embedding1, embedding2) {
-    let dotProduct = 0;
-    let norm1 = 0;
-    let norm2 = 0;
-
-    for (let i = 0; i < embedding1.length; i++) {
-      dotProduct += embedding1[i] * embedding2[i];
-      norm1 += embedding1[i] * embedding1[i];
-      norm2 += embedding2[i] * embedding2[i];
-    }
-
-    return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2));
+  async generateEmbedding(text) {
+    const embeddings = await this.generateEmbeddings([text]);
+    return embeddings[0];
   }
 }
 

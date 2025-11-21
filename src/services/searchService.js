@@ -1,68 +1,46 @@
 import { searchClient } from '../config/azureClients.js';
 import { embeddingService } from './embeddingService.js';
 
-export class SearchService {
+class SearchService {
   
   /**
-   * Index document chunks in Azure AI Search
+   * Search documents using vector similarity
+   * @param {Array|string} queryInput - Either an embedding vector (array) or text (string)
+   * @param {number} topK - Number of results to return
    */
-  async indexDocuments(processedDoc, embeddings) {
+  async searchDocuments(queryInput, topK = 5) {
     try {
-      console.log(`📊 Indexing ${processedDoc.chunks.length} chunks...`);
+      let queryEmbedding;
+
+      // Check if input is already an embedding (array of numbers)
+      if (Array.isArray(queryInput) && queryInput.length > 0 && typeof queryInput[0] === 'number') {
+        console.log(`🔍 Using provided embedding vector (dimension: ${queryInput.length})`);
+        queryEmbedding = queryInput;
+      } 
+      // If it's a string, generate embedding
+      else if (typeof queryInput === 'string') {
+        console.log(`🔍 Generating embedding for query: "${queryInput.substring(0, 50)}..."`);
+        queryEmbedding = await embeddingService.generateEmbedding(queryInput);
+      } 
+      // Invalid input
+      else {
+        throw new Error(`Invalid query input. Expected string or number array, got: ${typeof queryInput}`);
+      }
+
+      // Perform vector search
+      console.log(`🔍 Searching with vector (dimension: ${queryEmbedding.length})...`);
       
-      const documents = processedDoc.chunks.map((chunk, index) => ({
-        id: `${processedDoc.id}-chunk-${index}`,
-        content: chunk,
-        contentVector: embeddings[index],
-        fileName: processedDoc.fileName,
-        fileType: processedDoc.fileType,
-        language: processedDoc.language,
-        uploadDate: new Date(processedDoc.uploadDate),
-        metadata: JSON.stringify({
-          blobName: processedDoc.blobName,
-          chunkIndex: index,
-          totalChunks: processedDoc.chunks.length,
-          pageCount: processedDoc.pageCount
-        })
-      }));
-
-      const result = await searchClient.uploadDocuments(documents);
-      console.log(`✅ Indexed ${result.results.length} documents`);
-      
-      return result;
-    } catch (error) {
-      console.error('Error indexing documents:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Search for relevant documents using hybrid search (vector + keyword)
-   */
-  async searchDocuments(query, topK = 5) {
-    try {
-      console.log(`🔍 Searching for: "${query}"`);
-
-      // Generate embedding for query
-      const queryEmbedding = await embeddingService.generateEmbedding(query);
-
-      // Pure vector (hybrid) search – no semantic ranker
-      const searchResults = await searchClient.search(query, {
+      const searchResults = await searchClient.search('*', {
         vectorSearchOptions: {
-          queries: [
-            {
-              kind: 'vector',
-              vector: queryEmbedding,
-              fields: ['contentVector'],
-              kNearestNeighborsCount: topK
-            }
-          ]
+          queries: [{
+            kind: 'vector',
+            vector: queryEmbedding,
+            kNearestNeighborsCount: topK,
+            fields: ['contentVector']
+          }]
         },
         select: ['id', 'content', 'fileName', 'fileType', 'language', 'metadata'],
         top: topK
-        // ❌ Removed:
-        // queryType: 'semantic',
-        // semanticSearchOptions: { configurationName: 'semantic-config' }
       });
 
       const results = [];
@@ -73,13 +51,14 @@ export class SearchService {
           fileName: result.document.fileName,
           fileType: result.document.fileType,
           language: result.document.language,
-          score: result.score,
-          metadata: JSON.parse(result.document.metadata || '{}')
+          score: result.score || 0,
+          metadata: result.document.metadata
         });
       }
 
       console.log(`✅ Found ${results.length} relevant documents`);
       return results;
+
     } catch (error) {
       console.error('Error searching documents:', error);
       throw error;
@@ -87,61 +66,110 @@ export class SearchService {
   }
 
   /**
-   * Delete all chunks associated with a document
+   * Index a document with its content and embeddings
    */
-  async deleteDocumentChunks(documentId) {
+  async indexDocument(document) {
     try {
-      // Search for all chunks with this document ID prefix
-      const searchResults = await searchClient.search('*', {
-        filter: `search.ismatch('${documentId}*', 'id')`,
-        select: ['id']
-      });
+      console.log(`📊 Indexing ${document.chunks.length} chunks...`);
 
-      const idsToDelete = [];
-      for await (const result of searchResults.results) {
-        idsToDelete.push(result.document.id);
-      }
+      const documentsToIndex = document.chunks.map((chunk, index) => ({
+        id: `${document.id}-chunk-${index}`,
+        content: chunk.text,
+        contentVector: chunk.embedding,
+        fileName: document.fileName,
+        fileType: document.fileType,
+        language: document.language,
+        metadata: {
+          blobName: document.blobName,
+          chunkIndex: index,
+          totalChunks: document.chunks.length,
+          pageCount: document.pageCount
+        }
+      }));
 
-      if (idsToDelete.length > 0) {
-        const documents = idsToDelete.map(id => ({ id }));
-        await searchClient.deleteDocuments(documents);
-        console.log(`✅ Deleted ${idsToDelete.length} chunks from search index`);
-      }
+      await searchClient.uploadDocuments(documentsToIndex);
+      console.log(`✅ Indexed ${documentsToIndex.length} documents`);
 
-      return idsToDelete.length;
+      return {
+        success: true,
+        indexed: documentsToIndex.length
+      };
+
     } catch (error) {
-      console.error('Error deleting document chunks:', error);
+      console.error('Error indexing document:', error);
       throw error;
     }
   }
 
   /**
-   * List all indexed documents
+   * Delete documents by file name
    */
-  async listDocuments() {
+  async deleteDocumentsByFileName(fileName) {
     try {
-      const results = await searchClient.search('*', {
-        select: ['fileName', 'fileType', 'uploadDate', 'language'],
-        top: 100
+      // Search for all documents with this filename
+      const searchResults = await searchClient.search('*', {
+        filter: `fileName eq '${fileName}'`,
+        select: ['id']
       });
 
-      const documents = new Map();
-      
-      for await (const result of results.results) {
+      const idsToDelete = [];
+      for await (const result of searchResults.results) {
+        idsToDelete.push({ id: result.document.id });
+      }
+
+      if (idsToDelete.length > 0) {
+        await searchClient.deleteDocuments(idsToDelete);
+        console.log(`✅ Deleted ${idsToDelete.length} chunks for ${fileName}`);
+      }
+
+      return {
+        success: true,
+        deleted: idsToDelete.length
+      };
+
+    } catch (error) {
+      console.error('Error deleting documents:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all unique file names from index
+   */
+  async getAllDocuments() {
+    try {
+      const searchResults = await searchClient.search('*', {
+        select: ['fileName', 'fileType', 'language', 'metadata'],
+        top: 1000
+      });
+
+      const documents = [];
+      const seen = new Set();
+
+      for await (const result of searchResults.results) {
         const fileName = result.document.fileName;
-        if (!documents.has(fileName)) {
-          documents.set(fileName, {
-            fileName,
+        if (!seen.has(fileName)) {
+          seen.add(fileName);
+          
+          // Try to get upload date from metadata
+          let uploadDate = null;
+          if (result.document.metadata && result.document.metadata.uploadDate) {
+            uploadDate = result.document.metadata.uploadDate;
+          }
+
+          documents.push({
+            fileName: result.document.fileName,
             fileType: result.document.fileType,
-            uploadDate: result.document.uploadDate,
-            language: result.document.language
+            language: result.document.language,
+            uploadDate: uploadDate
           });
         }
       }
 
-      return Array.from(documents.values());
+      return documents;
+
     } catch (error) {
-      console.error('Error listing documents:', error);
+      console.error('Error getting documents:', error);
       throw error;
     }
   }
