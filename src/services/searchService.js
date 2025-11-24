@@ -1,34 +1,39 @@
-import { searchClient } from '../config/azureClients.js';
+import { SearchClient, AzureKeyCredential } from '@azure/search-documents';
 import { embeddingService } from './embeddingService.js';
+
+// Initialize Azure Search Client
+const searchClient = new SearchClient(
+  process.env.AZURE_SEARCH_ENDPOINT,
+  process.env.AZURE_SEARCH_INDEX_NAME,
+  new AzureKeyCredential(process.env.AZURE_SEARCH_API_KEY)
+);
 
 class SearchService {
   
   /**
    * Search documents using vector similarity
-   * @param {Array|string} queryInput - Either an embedding vector (array) or text (string)
-   * @param {number} topK - Number of results to return
    */
   async searchDocuments(queryInput, topK = 5) {
     try {
       let queryEmbedding;
 
-      // Check if input is already an embedding (array of numbers)
+      // Check if input is already an embedding vector
       if (Array.isArray(queryInput) && queryInput.length > 0 && typeof queryInput[0] === 'number') {
         console.log(`🔍 Using provided embedding vector (dimension: ${queryInput.length})`);
         queryEmbedding = queryInput;
       } 
-      // If it's a string, generate embedding
+      // If string, generate embedding
       else if (typeof queryInput === 'string') {
-        console.log(`🔍 Generating embedding for query: "${queryInput.substring(0, 50)}..."`);
+        const preview = queryInput.length > 50 ? queryInput.substring(0, 50) + '...' : queryInput;
+        console.log(`🔍 Generating embedding for: "${preview}"`);
         queryEmbedding = await embeddingService.generateEmbedding(queryInput);
       } 
-      // Invalid input
       else {
-        throw new Error(`Invalid query input. Expected string or number array, got: ${typeof queryInput}`);
+        throw new Error(`Invalid query input type: ${typeof queryInput}`);
       }
 
-      // Perform vector search
-      console.log(`🔍 Searching with vector (dimension: ${queryEmbedding.length})...`);
+      // Vector search
+      console.log(`🔍 Searching with vector (${queryEmbedding.length}-dim)...`);
       
       const searchResults = await searchClient.search('*', {
         vectorSearchOptions: {
@@ -39,20 +44,31 @@ class SearchService {
             fields: ['contentVector']
           }]
         },
-        select: ['id', 'content', 'fileName', 'fileType', 'language', 'metadata'],
+        select: ['id', 'content', 'fileName', 'fileType', 'language', 'uploadDate', 'metadata'],
         top: topK
       });
 
       const results = [];
       for await (const result of searchResults.results) {
+        // Parse metadata if it's a JSON string
+        let metadata = result.document.metadata;
+        if (typeof metadata === 'string') {
+          try {
+            metadata = JSON.parse(metadata);
+          } catch (e) {
+            // Keep as string if parsing fails
+          }
+        }
+
         results.push({
           id: result.document.id,
           content: result.document.content,
           fileName: result.document.fileName,
           fileType: result.document.fileType,
           language: result.document.language,
+          uploadDate: result.document.uploadDate,
           score: result.score || 0,
-          metadata: result.document.metadata
+          metadata: metadata
         });
       }
 
@@ -66,28 +82,37 @@ class SearchService {
   }
 
   /**
-   * Index a document with its content and embeddings
+   * Index document chunks
    */
   async indexDocument(document) {
     try {
-      console.log(`📊 Indexing ${document.chunks.length} chunks...`);
+      console.log(`📊 Indexing ${document.chunks.length} chunks for: ${document.fileName}`);
 
-      const documentsToIndex = document.chunks.map((chunk, index) => ({
-        id: `${document.id}-chunk-${index}`,
-        content: chunk.text,
-        contentVector: chunk.embedding,
-        fileName: document.fileName,
-        fileType: document.fileType,
-        language: document.language,
-        metadata: {
+      const documentsToIndex = document.chunks.map((chunk, index) => {
+        const metadataObj = {
           blobName: document.blobName,
           chunkIndex: index,
           totalChunks: document.chunks.length,
-          pageCount: document.pageCount
-        }
-      }));
+          pageCount: document.pageCount || null,
+          uploadDate: document.uploadDate || new Date().toISOString(),
+          hasAudio: document.hasAudio || false,
+          hasVisualText: document.hasVisualText || false
+        };
 
-      await searchClient.uploadDocuments(documentsToIndex);
+        return {
+          id: `${document.id}-chunk-${index}`,
+          content: chunk.text || '',
+          contentVector: chunk.embedding,
+          fileName: document.fileName,
+          fileType: document.fileType,
+          language: document.language || 'english',
+          uploadDate: metadataObj.uploadDate,
+          // Metadata as JSON string (Azure Search requirement)
+          metadata: JSON.stringify(metadataObj)
+        };
+      });
+
+      const result = await searchClient.uploadDocuments(documentsToIndex);
       console.log(`✅ Indexed ${documentsToIndex.length} documents`);
 
       return {
@@ -102,13 +127,19 @@ class SearchService {
   }
 
   /**
-   * Delete documents by file name
+   * Alias for backward compatibility
+   */
+  async indexDocuments(document) {
+    return this.indexDocument(document);
+  }
+
+  /**
+   * Delete documents by filename
    */
   async deleteDocumentsByFileName(fileName) {
     try {
-      // Search for all documents with this filename
       const searchResults = await searchClient.search('*', {
-        filter: `fileName eq '${fileName}'`,
+        filter: `fileName eq '${fileName.replace(/'/g, "''")}'`,
         select: ['id']
       });
 
@@ -119,7 +150,7 @@ class SearchService {
 
       if (idsToDelete.length > 0) {
         await searchClient.deleteDocuments(idsToDelete);
-        console.log(`✅ Deleted ${idsToDelete.length} chunks for ${fileName}`);
+        console.log(`✅ Deleted ${idsToDelete.length} chunks for: ${fileName}`);
       }
 
       return {
@@ -134,12 +165,12 @@ class SearchService {
   }
 
   /**
-   * Get all unique file names from index
+   * Get all unique documents
    */
   async getAllDocuments() {
     try {
       const searchResults = await searchClient.search('*', {
-        select: ['fileName', 'fileType', 'language', 'metadata'],
+        select: ['fileName', 'fileType', 'language', 'uploadDate'],
         top: 1000
       });
 
@@ -150,18 +181,11 @@ class SearchService {
         const fileName = result.document.fileName;
         if (!seen.has(fileName)) {
           seen.add(fileName);
-          
-          // Try to get upload date from metadata
-          let uploadDate = null;
-          if (result.document.metadata && result.document.metadata.uploadDate) {
-            uploadDate = result.document.metadata.uploadDate;
-          }
-
           documents.push({
             fileName: result.document.fileName,
             fileType: result.document.fileType,
             language: result.document.language,
-            uploadDate: uploadDate
+            uploadDate: result.document.uploadDate
           });
         }
       }
