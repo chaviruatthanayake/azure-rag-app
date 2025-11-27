@@ -2,12 +2,60 @@ import { googleDriveService } from './googleDriveService.js';
 import { documentProcessor } from './documentProcessor.js';
 import { embeddingService } from './embeddingService.js';
 import { searchService } from './searchService.js';
+import fs from 'fs';
+import path from 'path';
+
+const CACHE_FILE = path.join(process.cwd(), '.sync-cache.json');
 
 class DriveSyncService {
   constructor() {
     this.syncInProgress = false;
     this.lastSyncTime = null;
     this.syncedFiles = new Map(); // fileId -> {name, modifiedTime, indexed}
+    
+    // Load cache from file on initialization
+    this.loadCache();
+  }
+
+  /**
+   * Load cache from file
+   */
+  loadCache() {
+    try {
+      if (fs.existsSync(CACHE_FILE)) {
+        const data = fs.readFileSync(CACHE_FILE, 'utf8');
+        const cache = JSON.parse(data);
+        
+        // Restore Map from JSON
+        if (cache.syncedFiles) {
+          this.syncedFiles = new Map(Object.entries(cache.syncedFiles));
+        }
+        if (cache.lastSyncTime) {
+          this.lastSyncTime = new Date(cache.lastSyncTime);
+        }
+        
+        console.log(`📋 Loaded sync cache: ${this.syncedFiles.size} files tracked`);
+      }
+    } catch (error) {
+      console.log('⚠️ Could not load sync cache, starting fresh');
+    }
+  }
+
+  /**
+   * Save cache to file
+   */
+  saveCache() {
+    try {
+      const cache = {
+        syncedFiles: Object.fromEntries(this.syncedFiles),
+        lastSyncTime: this.lastSyncTime
+      };
+      
+      fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2), 'utf8');
+      console.log(`💾 Sync cache saved: ${this.syncedFiles.size} files tracked`);
+    } catch (error) {
+      console.log('⚠️ Could not save sync cache:', error.message);
+    }
   }
 
   /**
@@ -37,15 +85,73 @@ class DriveSyncService {
         files: []
       };
 
-      // 1. Get list of files from Google Drive
+      // 1. Get already indexed documents from Azure Search
+      console.log('📊 Checking already indexed documents in Azure Search...');
+      const indexedDocs = await searchService.getAllDocuments();
+      const indexedFileNames = new Set(indexedDocs.map(doc => doc.fileName));
+      console.log(`✅ Found ${indexedFileNames.size} documents already in Azure Search`);
+      
+      // Build a map of fileName -> uploadDate for Azure documents
+      const azureFileMap = new Map();
+      indexedDocs.forEach(doc => {
+        if (!azureFileMap.has(doc.fileName)) {
+          azureFileMap.set(doc.fileName, {
+            uploadDate: doc.uploadDate,
+            indexed: true
+          });
+        }
+      });
+
+      // 2. Get list of files from Google Drive
       const driveFiles = await googleDriveService.syncFolder(folderId);
       results.total = driveFiles.length;
 
       console.log(`📊 Processing ${driveFiles.length} files...`);
 
-      // 2. Process each file
+      // 3. Process each file
       for (const driveFile of driveFiles) {
         try {
+          const cachedFile = this.syncedFiles.get(driveFile.id);
+          const alreadyIndexed = indexedFileNames.has(driveFile.name);
+          
+          // SMART SKIP LOGIC:
+          // Skip if file is in Azure AND (in cache with same modified time OR cache is empty but file is in Azure)
+          if (alreadyIndexed) {
+            // If in cache with same modified time -> definitely skip
+            if (cachedFile && cachedFile.modifiedTime === driveFile.modifiedTime) {
+              console.log(`⏭️ Skipping ${driveFile.name} (already in Azure, not modified)`);
+              results.skipped++;
+              results.files.push({
+                fileName: driveFile.name,
+                success: true,
+                skipped: true,
+                message: 'Already indexed'
+              });
+              continue;
+            }
+            
+            // If NOT in cache but IS in Azure -> add to cache and skip (first run after restart)
+            if (!cachedFile) {
+              console.log(`⏭️ Skipping ${driveFile.name} (found in Azure, adding to cache)`);
+              this.syncedFiles.set(driveFile.id, {
+                name: driveFile.name,
+                modifiedTime: driveFile.modifiedTime,
+                indexed: azureFileMap.get(driveFile.name).uploadDate
+              });
+              results.skipped++;
+              results.files.push({
+                fileName: driveFile.name,
+                success: true,
+                skipped: true,
+                message: 'Already indexed (cache rebuilt)'
+              });
+              continue;
+            }
+            
+            // If in cache but modified time different -> re-process
+            console.log(`🔄 Re-processing ${driveFile.name} (file was modified)`);
+          }
+          
           const fileResult = await this.processFile(driveFile, folderId);
           
           if (fileResult.skipped) {
@@ -70,6 +176,9 @@ class DriveSyncService {
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
       this.lastSyncTime = new Date();
+
+      // Save cache to file for persistence across restarts
+      this.saveCache();
 
       console.log('\n📊 Sync Summary:');
       console.log(`   Total files: ${results.total}`);
@@ -228,6 +337,17 @@ class DriveSyncService {
    */
   clearCache() {
     this.syncedFiles.clear();
+    this.lastSyncTime = null;
+    
+    // Delete cache file
+    try {
+      if (fs.existsSync(CACHE_FILE)) {
+        fs.unlinkSync(CACHE_FILE);
+      }
+    } catch (error) {
+      console.log('⚠️ Could not delete cache file:', error.message);
+    }
+    
     console.log('🗑️ Sync cache cleared');
   }
 }
