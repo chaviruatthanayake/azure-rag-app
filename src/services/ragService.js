@@ -17,33 +17,64 @@ class RAGService {
 
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
-      const prompt = `You are an expert AI assistant helping users with questions about their documents.
+      const prompt = `You are a highly accurate AI assistant that answers questions STRICTLY based on provided document content.
 
-CONTEXT FROM USER'S DOCUMENTS:
+==================================================
+DOCUMENT CONTENT (Your ONLY source of information):
+==================================================
 ${context}
 
-USER QUESTION:
-${question}
+==================================================
+USER'S QUESTION: ${question}
+==================================================
 
-INSTRUCTIONS:
-1. **Answer based on the context provided above**
-2. **For "how-to" questions:** Provide clear, step-by-step instructions with specific details
-3. **For Excel/Word/document questions:** Give practical guidance with actual steps, formulas, or commands
-4. **For video content questions:** Reference what was shown/said in the video
-5. **Be comprehensive and practical:**
-   - Use information from the context
-   - Provide actionable steps
-   - Include specific tools, commands, formulas, or code when relevant
-   - Add tips and best practices
-6. **If the answer requires general knowledge beyond the documents:** 
-   - State what you found in the documents
-   - Then provide general guidance, clearly noting it's general knowledge
-7. **If information is NOT in the documents at all:** Say "Information not found in the provided documents"
-8. **Format clearly:** Use sections, bullet points, numbered steps, and code blocks for readability
+CRITICAL RULES (Follow EXACTLY):
 
-IMPORTANT: Answer in ${language}.
+1. READ THE DOCUMENT CONTENT ABOVE THOROUGHLY
+   - The content includes text extracted from PDFs, Word docs, Excel files, images (via OCR), and videos (via transcription)
+   - File names show the source: [Source X: filename.ext (type)]
+   - THIS IS YOUR PRIMARY AND ONLY SOURCE - Use it!
 
-YOUR DETAILED ANSWER:`;
+2. ANSWER STRATEGY:
+   
+   A) IF the document content CONTAINS the answer:
+      ✓ Provide a detailed, accurate answer
+      ✓ Quote or reference specific information from the documents
+      ✓ Mention which file(s) the information came from
+      ✓ Be specific and comprehensive
+   
+   B) IF the document content is RELATED but doesn't fully answer:
+      ✓ Start with: "Based on the documents, here's what I found: [info from docs]"
+      ✓ Then add: "To fully answer your question: [general knowledge]"
+      ✓ Clearly separate what's from docs vs. general knowledge
+   
+   C) IF the document content is NOT RELATED at all:
+      ✓ Say: "The provided documents don't contain information about [topic]."
+      ✓ Then offer: "However, I can provide general information: [helpful answer]"
+
+3. FOR DIFFERENT FILE TYPES:
+   - Images (PNG/JPG): The content shows text extracted via OCR
+   - Videos (MP4/MOV): The content shows transcribed speech and visible text
+   - Documents (PDF/DOCX): The content shows the actual document text
+   - Spreadsheets (XLSX): The content shows data from all sheets
+
+4. FOR "HOW-TO" QUESTIONS:
+   - First check if documents contain instructions
+   - If yes: Use those instructions
+   - If no: Provide standard how-to steps with clear disclaimer
+
+5. QUALITY REQUIREMENTS:
+   ✓ Be accurate - Never make up information
+   ✓ Be specific - Use actual details from documents
+   ✓ Be helpful - Provide actionable information
+   ✓ Be honest - Admit when documents don't contain the answer
+   ✓ Be clear - Use proper formatting (bullets, numbers, sections)
+
+6. LANGUAGE: Respond in ${language}
+
+==================================================
+YOUR ANSWER (Following all rules above):
+==================================================`;
 
       const result = await model.generateContent(prompt);
       const response = await result.response;
@@ -69,12 +100,12 @@ YOUR DETAILED ANSWER:`;
       // 1. Generate embedding for the question
       const questionEmbedding = await embeddingService.generateEmbedding(question);
       
-      // 2. Search for relevant documents
-      const searchResults = await searchService.searchDocuments(questionEmbedding, 5);
+      // 2. Search for relevant documents (get top 10 for better context)
+      const searchResults = await searchService.searchDocuments(questionEmbedding, 10);
 
       if (searchResults.length === 0) {
         return {
-          answer: 'No relevant documents found. Please upload documents first.',
+          answer: 'No relevant documents found. Please upload documents first or sync from Google Drive.',
           sources: [],
           usedInternetSearch: false,
           usedGemini: true,
@@ -82,22 +113,25 @@ YOUR DETAILED ANSWER:`;
         };
       }
 
-      console.log(`📚 Building context from ${searchResults.length} documents...`);
+      console.log(`📚 Building context from ${searchResults.length} unique documents...`);
 
-      // 3. Build context from search results
+      // 3. Build rich context from search results
       const context = searchResults
         .map((doc, idx) => {
-          return `[Source ${idx + 1}: ${doc.fileName} (${doc.fileType})]\n${doc.content}`;
+          const preview = doc.content.length > 2000 ? doc.content.substring(0, 2000) + '...' : doc.content;
+          return `[Source ${idx + 1}: ${doc.fileName} (${doc.fileType})]\n${preview}`;
         })
         .join('\n\n---\n\n');
+
+      console.log(`📝 Context built: ${context.length} characters from ${searchResults.length} sources`);
 
       // 4. Generate answer with Gemini
       const answer = await this.generateAnswerWithGemini(question, context, language);
 
-      // 5. Return result
+      // 5. Return result with only top 5 sources for UI display
       return {
         answer,
-        sources: searchResults,
+        sources: searchResults.slice(0, 5), // Only show top 5 in UI
         usedInternetSearch: false,
         usedGemini: true,
         model: GEMINI_MODEL,

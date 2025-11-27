@@ -13,7 +13,7 @@ class SearchService {
   /**
    * Search documents using vector similarity
    */
-  async searchDocuments(queryInput, topK = 5) {
+  async searchDocuments(queryInput, topK = 10) {
     try {
       let queryEmbedding;
 
@@ -32,15 +32,15 @@ class SearchService {
         throw new Error(`Invalid query input type: ${typeof queryInput}`);
       }
 
-      // Vector search
-      console.log(`🔍 Searching with vector (${queryEmbedding.length}-dim)...`);
+      // Vector search with higher K for better recall
+      console.log(`🔍 Searching with vector (${queryEmbedding.length}-dim) for top ${topK} results...`);
       
       const searchResults = await searchClient.search('*', {
         vectorSearchOptions: {
           queries: [{
             kind: 'vector',
             vector: queryEmbedding,
-            kNearestNeighborsCount: topK,
+            kNearestNeighborsCount: topK * 2, // Get more candidates for better filtering
             fields: ['contentVector']
           }]
         },
@@ -49,7 +49,16 @@ class SearchService {
       });
 
       const results = [];
+      const seenFiles = new Set(); // Track files to avoid duplicates
+      
       for await (const result of searchResults.results) {
+        // Skip if we've already seen this file
+        if (seenFiles.has(result.document.fileName)) {
+          continue;
+        }
+        
+        seenFiles.add(result.document.fileName);
+        
         // Parse metadata if it's a JSON string
         let metadata = result.document.metadata;
         if (typeof metadata === 'string') {
@@ -70,9 +79,14 @@ class SearchService {
           score: result.score || 0,
           metadata: metadata
         });
+        
+        // Stop if we have enough unique results
+        if (results.length >= topK) {
+          break;
+        }
       }
 
-      console.log(`✅ Found ${results.length} relevant documents`);
+      console.log(`✅ Found ${results.length} unique documents (filtered from duplicates)`);
       return results;
 
     } catch (error) {

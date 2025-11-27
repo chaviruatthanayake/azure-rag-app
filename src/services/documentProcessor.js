@@ -130,6 +130,19 @@ export class DocumentProcessor {
         pageCount = result.pages ? result.pages.length : 0;
       }
 
+      else if (fileType === 'video/mp4' || fileType === 'video/quicktime' || fileType === 'video/x-msvideo') {
+        console.log('🎬 Processing video file...');
+        // For video files called from extractText, we need to create a file object
+        const tempFile = {
+          buffer: fileBuffer,
+          originalname: 'video.' + (fileType === 'video/mp4' ? 'mp4' : fileType === 'video/quicktime' ? 'mov' : 'avi'),
+          mimetype: fileType
+        };
+        const videoResult = await this.processVideo(tempFile);
+        extractedText = videoResult.text;
+        pageCount = 0;
+      }
+
       else {
         throw new Error(`Unsupported file type: ${fileType}`);
       }
