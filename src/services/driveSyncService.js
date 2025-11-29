@@ -254,34 +254,60 @@ class DriveSyncService {
 
       console.log(`✅ Extracted ${extractedData.text.length} characters`);
 
-      // 4. Chunk text
-      const chunks = documentProcessor.chunkText(extractedData.text);
+      // 4. Detect language and translate to English if needed
+      const { translatorService } = await import('./translatorService.js');
+      const detectedLanguage = await translatorService.detectLanguage(extractedData.text);
+      console.log(`🌍 Document language: ${translatorService.getLanguageName(detectedLanguage)}`);
+
+      let textToIndex = extractedData.text;
+      let translationInfo = {
+        originalLanguage: detectedLanguage,
+        wasTranslated: false
+      };
+
+      if (detectedLanguage !== 'en') {
+        console.log(`🌐 Translating to English for indexing...`);
+        const translationResult = await translatorService.translateToEnglish(extractedData.text, detectedLanguage);
+        textToIndex = translationResult.translatedText;
+        translationInfo.wasTranslated = translationResult.wasTranslated;
+        
+        if (translationResult.wasTranslated) {
+          console.log(`✅ Translation completed: ${detectedLanguage} → English`);
+        }
+      }
+
+      // 5. Chunk text (now in English)
+      const chunks = documentProcessor.chunkText(textToIndex);
       console.log(`✅ Created ${chunks.length} chunks`);
 
-      // 5. Detect language
-      const language = documentProcessor.detectLanguage(extractedData.text);
+      // 6. Detect language (store original)
+      const language = detectedLanguage;
 
-      // 6. Generate embeddings
+      // 7. Generate embeddings
       console.log(`🧠 Generating embeddings for ${chunks.length} chunks...`);
       // chunks is already an array of strings from chunkText()
       const embeddings = await embeddingService.generateEmbeddings(chunks);
 
-      // 7. Prepare document for indexing
+      // 8. Prepare document for indexing
       const document = {
         id: fileId,
         fileName: fileName,
         fileType: mimeType,
-        language: language,
+        language: language, // Original language
         blobName: `gdrive-${fileId}`,
         pageCount: extractedData.pageCount || null,
         uploadDate: new Date().toISOString(),
         chunks: chunks.map((chunkText, index) => ({
           text: chunkText,  // chunk is a string, use it directly
           embedding: embeddings[index]
-        }))
+        })),
+        metadata: {
+          originalLanguage: detectedLanguage,
+          indexedInEnglish: translationInfo.wasTranslated
+        }
       };
 
-      // 8. Delete old chunks if file was previously indexed (prevents duplicates)
+      // 9. Delete old chunks if file was previously indexed (prevents duplicates)
       if (cachedFile) {
         console.log(`🗑️ Removing old chunks for ${fileName}...`);
         try {

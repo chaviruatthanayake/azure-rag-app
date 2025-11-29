@@ -103,6 +103,82 @@ YOUR DETAILED ANSWER (using the sources above):
   }
 
   /**
+   * Calculate similarity between two strings (0-1)
+   */
+  calculateSimilarity(str1, str2) {
+    const longer = str1.length > str2.length ? str1 : str2;
+    const shorter = str1.length > str2.length ? str2 : str1;
+    
+    if (longer.length === 0) return 1.0;
+    
+    const editDistance = this.levenshteinDistance(longer, shorter);
+    return (longer.length - editDistance) / longer.length;
+  }
+
+  /**
+   * Calculate Levenshtein distance between two strings
+   */
+  levenshteinDistance(str1, str2) {
+    const matrix = [];
+    
+    for (let i = 0; i <= str2.length; i++) {
+      matrix[i] = [i];
+    }
+    
+    for (let j = 0; j <= str1.length; j++) {
+      matrix[0][j] = j;
+    }
+    
+    for (let i = 1; i <= str2.length; i++) {
+      for (let j = 1; j <= str1.length; j++) {
+        if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1,
+            matrix[i][j - 1] + 1,
+            matrix[i - 1][j] + 1
+          );
+        }
+      }
+    }
+    
+    return matrix[str2.length][str1.length];
+  }
+
+  /**
+   * Extract file name from question if user mentions a specific file
+   */
+  extractFileName(question) {
+    // Common patterns for mentioning files:
+    // "about the file X.pdf"
+    // "in document Y.docx"
+    // "the content in Z.pdf"
+    // "explain X.pdf"
+    
+    // Look for common file extensions
+    const patterns = [
+      /(?:in|about|from|explain|describe|summarize|tell me about)\s+(?:the\s+)?(?:file|document|pdf|content in)?\s*["""]?([^"""\n]+?\.(pdf|docx|xlsx|pptx|txt|mp4|mov|avi|png|jpg|jpeg))["""]?/i,
+      /["""]([^"""\n]+?\.(pdf|docx|xlsx|pptx|txt|mp4|mov|avi|png|jpg|jpeg))["""]?/i,
+      /([A-Z][^.]*?\.(pdf|docx|xlsx|pptx|txt|mp4|mov|avi|png|jpg|jpeg))/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = question.match(pattern);
+      if (match) {
+        let fileName = match[1].trim();
+        // Remove quotes if present
+        fileName = fileName.replace(/["""]/g, '');
+        // Remove common prefixes
+        fileName = fileName.replace(/^(the |file |document |content in |about )/i, '');
+        return fileName;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Main method to generate answers
    */
   async generateAnswer(question, language = 'english') {
@@ -110,8 +186,28 @@ YOUR DETAILED ANSWER (using the sources above):
       console.log(`💬 Generating answer for: "${question}"`);
       console.log(`🔧 Using: Azure OpenAI (embeddings) + Gemini (answers)`);
 
+      // 1. Detect question language
+      const { translatorService } = await import('./translatorService.js');
+      const questionLanguage = await translatorService.detectLanguage(question);
+      console.log(`🌍 Question language: ${translatorService.getLanguageName(questionLanguage)}`);
+
+      // 2. Translate question to English if needed (for better search)
+      let searchQuestion = question;
+      if (questionLanguage !== 'en') {
+        console.log(`🌐 Translating question to English for search...`);
+        const translationResult = await translatorService.translateToEnglish(question, questionLanguage);
+        searchQuestion = translationResult.translatedText;
+        console.log(`✅ Translated question: "${searchQuestion}"`);
+      }
+
+      // 2.5 Check if user is asking about a specific file
+      const fileNameMatch = this.extractFileName(question);
+      if (fileNameMatch) {
+        console.log(`📄 User asking about specific file: ${fileNameMatch}`);
+      }
+
       // Check if question is asking about specific file types
-      const questionLower = question.toLowerCase();
+      const questionLower = searchQuestion.toLowerCase();
       const asksAboutVideos = questionLower.includes('video') || questionLower.includes('mp4') || questionLower.includes('recording');
       const asksAboutImages = questionLower.includes('image') || questionLower.includes('png') || questionLower.includes('jpg') || questionLower.includes('picture');
       const asksAboutDocuments = questionLower.includes('document') || questionLower.includes('pdf') || questionLower.includes('file');
@@ -121,6 +217,34 @@ YOUR DETAILED ANSWER (using the sources above):
       
       // 2. Search for relevant documents
       let searchResults = await searchService.searchDocuments(questionEmbedding, 10);
+
+      // 2.5 If user mentioned a specific file name, filter to only that file
+      if (fileNameMatch && searchResults.length > 0) {
+        // Try to find files that match the mentioned name
+        // Use fuzzy matching - check if file name contains the mentioned name or vice versa
+        const specificFileResults = searchResults.filter(r => {
+          if (!r.fileName) return false;
+          
+          const fileName = r.fileName.toLowerCase();
+          const mentioned = fileNameMatch.toLowerCase();
+          
+          // Remove file extensions for comparison
+          const fileNameWithoutExt = fileName.replace(/\.(pdf|docx|xlsx|pptx|txt|mp4|mov|avi|png|jpg|jpeg)$/i, '');
+          const mentionedWithoutExt = mentioned.replace(/\.(pdf|docx|xlsx|pptx|txt|mp4|mov|avi|png|jpg|jpeg)$/i, '');
+          
+          // Check if they match (either direction)
+          return fileNameWithoutExt.includes(mentionedWithoutExt) || 
+                 mentionedWithoutExt.includes(fileNameWithoutExt) ||
+                 this.calculateSimilarity(fileNameWithoutExt, mentionedWithoutExt) > 0.7;
+        });
+        
+        if (specificFileResults.length > 0) {
+          console.log(`✅ Filtered to specific file: Found ${specificFileResults.length} chunks from "${fileNameMatch}"`);
+          searchResults = specificFileResults;
+        } else {
+          console.log(`⚠️ File "${fileNameMatch}" not found in search results, using all results`);
+        }
+      }
 
       // 3. If asking about specific file types and we don't have any, get documents of that type
       if (searchResults.length > 0) {
@@ -186,17 +310,26 @@ YOUR DETAILED ANSWER (using the sources above):
 
       console.log(`📝 Context built: ${context.length} characters from ${searchResults.length} sources`);
 
-      // 5. Generate answer with Gemini
-      const answer = await this.generateAnswerWithGemini(question, context, language);
+      // 5. Generate answer with Gemini (in English)
+      const answer = await this.generateAnswerWithGemini(searchQuestion, context, 'english');
 
-      // 6. Return result with only top 5 sources for UI display
+      // 6. Translate answer back to user's language if needed
+      let finalAnswer = answer;
+      if (questionLanguage !== 'en') {
+        console.log(`🌐 Translating answer to ${translatorService.getLanguageName(questionLanguage)}...`);
+        finalAnswer = await translatorService.translateAnswer(answer, questionLanguage);
+        console.log(`✅ Answer translated to user's language`);
+      }
+
+      // 7. Return result with only top 5 sources for UI display
       return {
-        answer,
+        answer: finalAnswer,
         sources: searchResults.slice(0, 5), // Only show top 5 in UI
         usedInternetSearch: false,
         usedGemini: true,
         model: GEMINI_MODEL,
-        language
+        language: questionLanguage,
+        translatedFrom: questionLanguage !== 'en' ? 'en' : null
       };
 
     } catch (error) {
