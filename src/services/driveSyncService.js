@@ -263,8 +263,8 @@ class DriveSyncService {
 
       // 6. Generate embeddings
       console.log(`🧠 Generating embeddings for ${chunks.length} chunks...`);
-      const chunkTexts = chunks.map(c => c.text);
-      const embeddings = await embeddingService.generateEmbeddings(chunkTexts);
+      // chunks is already an array of strings from chunkText()
+      const embeddings = await embeddingService.generateEmbeddings(chunks);
 
       // 7. Prepare document for indexing
       const document = {
@@ -275,8 +275,8 @@ class DriveSyncService {
         blobName: `gdrive-${fileId}`,
         pageCount: extractedData.pageCount || null,
         uploadDate: new Date().toISOString(),
-        chunks: chunks.map((chunk, index) => ({
-          text: chunk.text,
+        chunks: chunks.map((chunkText, index) => ({
+          text: chunkText,  // chunk is a string, use it directly
           embedding: embeddings[index]
         }))
       };

@@ -179,31 +179,80 @@ class SearchService {
   }
 
   /**
-   * Get all unique documents
+   * Get all documents of a specific file type (with content)
+   */
+  async getDocumentsByFileType(fileType) {
+    try {
+      console.log(`🔍 Getting all ${fileType} files...`);
+      
+      // Get all documents and filter by file type in memory
+      const allDocs = await this.getAllDocuments();
+      const filteredDocs = allDocs.filter(doc => 
+        doc.fileType && doc.fileType.includes(fileType)
+      );
+      
+      console.log(`✅ Found ${filteredDocs.length} ${fileType} files`);
+      return filteredDocs;
+
+    } catch (error) {
+      console.error('Error getting documents by file type:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all unique documents (with ALL chunks combined)
    */
   async getAllDocuments() {
     try {
       const searchResults = await searchClient.search('*', {
-        select: ['fileName', 'fileType', 'language', 'uploadDate'],
+        select: ['id', 'content', 'fileName', 'fileType', 'language', 'uploadDate'],
         top: 1000
       });
 
-      const documents = [];
-      const seen = new Set();
+      const fileChunks = new Map(); // fileName -> array of chunks
 
+      // Collect all chunks for each file
       for await (const result of searchResults.results) {
         const fileName = result.document.fileName;
-        if (!seen.has(fileName)) {
-          seen.add(fileName);
-          documents.push({
-            fileName: result.document.fileName,
+        
+        if (!fileChunks.has(fileName)) {
+          fileChunks.set(fileName, {
+            chunks: [],
             fileType: result.document.fileType,
             language: result.document.language,
-            uploadDate: result.document.uploadDate
+            uploadDate: result.document.uploadDate,
+            id: result.document.id
           });
+        }
+        
+        // Add chunk content (with debug logging)
+        const chunkContent = result.document.content || '';
+        if (chunkContent) {
+          console.log(`📝 ${fileName}: chunk has ${chunkContent.length} chars`);
+          fileChunks.get(fileName).chunks.push(chunkContent);
+        } else {
+          console.log(`⚠️ ${fileName}: chunk is EMPTY`);
         }
       }
 
+      // Combine chunks for each file
+      const documents = [];
+      for (const [fileName, data] of fileChunks.entries()) {
+        const combinedContent = data.chunks.join('\n\n');
+        console.log(`📊 ${fileName}: Total ${combinedContent.length} chars from ${data.chunks.length} chunks`);
+        documents.push({
+          id: data.id,
+          fileName: fileName,
+          fileType: data.fileType,
+          language: data.language,
+          uploadDate: data.uploadDate,
+          content: combinedContent,
+          score: 0
+        });
+      }
+
+      console.log(`✅ Retrieved ${documents.length} unique documents with combined content`);
       return documents;
 
     } catch (error) {

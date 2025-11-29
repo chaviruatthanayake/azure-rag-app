@@ -17,10 +17,10 @@ class RAGService {
 
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
-      const prompt = `You are a highly accurate AI assistant that answers questions STRICTLY based on provided document content.
+      const prompt = `You are a highly accurate AI assistant. Your job is to answer questions using the DOCUMENT CONTENT provided below.
 
 ==================================================
-DOCUMENT CONTENT (Your ONLY source of information):
+DOCUMENT CONTENT (Your SOURCE of truth):
 ==================================================
 ${context}
 
@@ -28,52 +28,65 @@ ${context}
 USER'S QUESTION: ${question}
 ==================================================
 
-CRITICAL RULES (Follow EXACTLY):
+CRITICAL RULES - READ CAREFULLY:
 
-1. READ THE DOCUMENT CONTENT ABOVE THOROUGHLY
-   - The content includes text extracted from PDFs, Word docs, Excel files, images (via OCR), and videos (via transcription)
-   - File names show the source: [Source X: filename.ext (type)]
-   - THIS IS YOUR PRIMARY AND ONLY SOURCE - Use it!
+1. EXAMINE THE DOCUMENT CONTENT ABOVE:
+   - Look at the [Source X: filename.ext (type)] headers
+   - Read the actual content under each source
+   - Note the file types: PDF, MP4 (video), PNG (image), DOCX, etc.
 
-2. ANSWER STRATEGY:
+2. IDENTIFY WHAT FILES YOU HAVE:
+   - Count how many sources are listed above
+   - List the file names and their types
+   - Note if there are videos (mp4, mov), images (png, jpg), or documents (pdf, docx)
+
+3. HANDLE EMPTY CONTENT:
+   - If a source shows "[No content available]" or has very little text:
+     * For videos: Say "Video file exists but no audio/visual text was extracted (possibly silent or unclear)"
+     * For images: Say "Image file exists but no readable text was detected (possibly no text or unclear)"
+     * For PDFs: Say "Document exists but content could not be extracted"
+   - Still LIST the file as existing, just note content limitations
+
+4. ANSWER THE QUESTION:
    
-   A) IF the document content CONTAINS the answer:
-      ✓ Provide a detailed, accurate answer
-      ✓ Quote or reference specific information from the documents
-      ✓ Mention which file(s) the information came from
-      ✓ Be specific and comprehensive
+   A) If question asks "what videos/images/documents do I have?":
+      → LIST all files of that type from the sources above
+      → Include file names even if content is empty
+      → Note which have content and which don't
+      → Example: "You have 3 videos: [list with content status]"
    
-   B) IF the document content is RELATED but doesn't fully answer:
-      ✓ Start with: "Based on the documents, here's what I found: [info from docs]"
-      ✓ Then add: "To fully answer your question: [general knowledge]"
-      ✓ Clearly separate what's from docs vs. general knowledge
+   B) If question asks about content in specific file types:
+      → Use the actual content from those file sources
+      → For videos: Mention transcribed audio and visible text (if available)
+      → For images: Mention OCR extracted text (if available)
+      → If empty: Explain that file exists but content couldn't be extracted
    
-   C) IF the document content is NOT RELATED at all:
-      ✓ Say: "The provided documents don't contain information about [topic]."
-      ✓ Then offer: "However, I can provide general information: [helpful answer]"
+   C) If question asks general "what's in these documents?":
+      → Summarize ALL sources above
+      → Group by type (videos, images, documents)
+      → For each file: describe content OR note if empty
+   
+   D) If documents don't answer the question:
+      → Say "Based on the provided documents: [what you found]"
+      → Then add: "However, to fully answer: [general knowledge]"
 
-3. FOR DIFFERENT FILE TYPES:
-   - Images (PNG/JPG): The content shows text extracted via OCR
-   - Videos (MP4/MOV): The content shows transcribed speech and visible text
-   - Documents (PDF/DOCX): The content shows the actual document text
-   - Spreadsheets (XLSX): The content shows data from all sheets
+5. FILE TYPE MEANINGS:
+   - video/mp4, video/quicktime = Video files (audio transcription + frame OCR)
+   - image/png, image/jpeg = Images (OCR text extraction)
+   - application/pdf = PDF documents (full text)
+   - application/vnd.openxmlformats = Word/Excel documents
 
-4. FOR "HOW-TO" QUESTIONS:
-   - First check if documents contain instructions
-   - If yes: Use those instructions
-   - If no: Provide standard how-to steps with clear disclaimer
+6. BE SPECIFIC AND HONEST:
+   ✓ Use actual file names from sources
+   ✓ Quote or reference specific content when available
+   ✓ Admit when content is empty or unclear
+   ✓ Don't ignore sources - acknowledge ALL of them
+   ✓ If there are videos in sources, LIST THEM even if content is empty
 
-5. QUALITY REQUIREMENTS:
-   ✓ Be accurate - Never make up information
-   ✓ Be specific - Use actual details from documents
-   ✓ Be helpful - Provide actionable information
-   ✓ Be honest - Admit when documents don't contain the answer
-   ✓ Be clear - Use proper formatting (bullets, numbers, sections)
-
-6. LANGUAGE: Respond in ${language}
+7. FORMAT: Answer in ${language}
 
 ==================================================
-YOUR ANSWER (Following all rules above):
+YOUR DETAILED ANSWER (using the sources above):
 ==================================================`;
 
       const result = await model.generateContent(prompt);
@@ -97,11 +110,44 @@ YOUR ANSWER (Following all rules above):
       console.log(`💬 Generating answer for: "${question}"`);
       console.log(`🔧 Using: Azure OpenAI (embeddings) + Gemini (answers)`);
 
+      // Check if question is asking about specific file types
+      const questionLower = question.toLowerCase();
+      const asksAboutVideos = questionLower.includes('video') || questionLower.includes('mp4') || questionLower.includes('recording');
+      const asksAboutImages = questionLower.includes('image') || questionLower.includes('png') || questionLower.includes('jpg') || questionLower.includes('picture');
+      const asksAboutDocuments = questionLower.includes('document') || questionLower.includes('pdf') || questionLower.includes('file');
+
       // 1. Generate embedding for the question
       const questionEmbedding = await embeddingService.generateEmbedding(question);
       
-      // 2. Search for relevant documents (get top 10 for better context)
-      const searchResults = await searchService.searchDocuments(questionEmbedding, 10);
+      // 2. Search for relevant documents
+      let searchResults = await searchService.searchDocuments(questionEmbedding, 10);
+
+      // 3. If asking about specific file types and we don't have any, get documents of that type
+      if (searchResults.length > 0) {
+        const hasVideos = searchResults.some(r => r.fileType && r.fileType.includes('video'));
+        const hasImages = searchResults.some(r => r.fileType && r.fileType.includes('image'));
+        
+        // If asking about videos but search didn't find videos, get all video documents
+        if (asksAboutVideos && !hasVideos) {
+          console.log('📹 Question is about videos but search didn\'t find any, getting all videos...');
+          const videoFiles = await searchService.getDocumentsByFileType('video');
+          if (videoFiles.length > 0) {
+            console.log(`✅ Found ${videoFiles.length} video files with content`);
+            // Add videos to the beginning of search results
+            searchResults = [...videoFiles.slice(0, 5), ...searchResults.slice(0, 5)];
+          }
+        }
+        
+        // If asking about images but search didn't find images, get all image documents
+        if (asksAboutImages && !hasImages) {
+          console.log('🖼️ Question is about images but search didn\'t find any, getting all images...');
+          const imageFiles = await searchService.getDocumentsByFileType('image');
+          if (imageFiles.length > 0) {
+            console.log(`✅ Found ${imageFiles.length} image files with content`);
+            searchResults = [...imageFiles.slice(0, 5), ...searchResults.slice(0, 5)];
+          }
+        }
+      }
 
       if (searchResults.length === 0) {
         return {
@@ -115,20 +161,35 @@ YOUR ANSWER (Following all rules above):
 
       console.log(`📚 Building context from ${searchResults.length} unique documents...`);
 
-      // 3. Build rich context from search results
+      // 4. Build rich context from search results
       const context = searchResults
         .map((doc, idx) => {
-          const preview = doc.content.length > 2000 ? doc.content.substring(0, 2000) + '...' : doc.content;
+          // Handle missing content field
+          const content = doc.content || doc.text || '';
+          
+          if (!content || content.trim().length === 0) {
+            console.log(`⚠️ Warning: No content for ${doc.fileName}`);
+            return `[Source ${idx + 1}: ${doc.fileName} (${doc.fileType})]\n[No content available - file was processed but no text could be extracted]`;
+          }
+          
+          // For very short content (< 50 chars), show it all
+          if (content.length < 50) {
+            console.log(`⚠️ Warning: Minimal content for ${doc.fileName} (${content.length} chars)`);
+            return `[Source ${idx + 1}: ${doc.fileName} (${doc.fileType})]\nContent: ${content}`;
+          }
+          
+          // For longer content, show preview
+          const preview = content.length > 2000 ? content.substring(0, 2000) + '...' : content;
           return `[Source ${idx + 1}: ${doc.fileName} (${doc.fileType})]\n${preview}`;
         })
         .join('\n\n---\n\n');
 
       console.log(`📝 Context built: ${context.length} characters from ${searchResults.length} sources`);
 
-      // 4. Generate answer with Gemini
+      // 5. Generate answer with Gemini
       const answer = await this.generateAnswerWithGemini(question, context, language);
 
-      // 5. Return result with only top 5 sources for UI display
+      // 6. Return result with only top 5 sources for UI display
       return {
         answer,
         sources: searchResults.slice(0, 5), // Only show top 5 in UI
