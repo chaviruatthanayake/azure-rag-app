@@ -320,7 +320,15 @@ class DriveSyncService {
 
       // 9. Index in Azure Search
       console.log(`🔍 Indexing ${fileName} in Azure AI Search...`);
-      await searchService.indexDocument(document);
+      await searchService.indexDocument(fileId, textToIndex, {
+  fileName: fileName,
+  fileType: mimeType,
+  language: language,
+  uploadDate: new Date().toISOString(),
+  originalLanguage: detectedLanguage,
+  indexedInEnglish: translationInfo.wasTranslated,
+  chunks: chunks.length
+});
 
       // 10. Update cache
       this.syncedFiles.set(fileId, {

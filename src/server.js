@@ -1,4 +1,5 @@
 import express from 'express';
+
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -442,6 +443,14 @@ app.get('*', (req, res) => {
 // ===================================
 // START SERVER
 // ===================================
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
 
 app.listen(PORT, async () => {
   console.log('==========================================');

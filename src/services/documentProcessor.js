@@ -1,45 +1,58 @@
-import { docIntelligenceClient, containerClient } from '../config/azureClients.js';
 import { v4 as uuidv4 } from 'uuid';
 import mammoth from 'mammoth';
 import * as XLSX from 'xlsx';
-import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
 import { exec } from 'child_process';
 import os from 'os';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { gcpVisionService } from './gcp/gcpVisionService.js';
+import { gcpSpeechService } from './gcp/gcpSpeechService.js';
 
 const execAsync = promisify(exec);
 
+/**
+ * Document Processor - 100% GCP (NO Azure)
+ * Uses:
+ * - Gemini Vision for PDF/image OCR
+ * - Google Cloud Speech for audio transcription
+ * - Gemini for video frame analysis
+ */
 export class DocumentProcessor {
   
-  /**
-   * Upload document to Azure Blob Storage
-   */
-  async uploadToBlob(file, fileName) {
-    try {
-      const blobName = `${uuidv4()}-${fileName}`;
-      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
-      
-      await blockBlobClient.uploadData(file.buffer, {
-        blobHTTPHeaders: {
-          blobContentType: file.mimetype
-        }
-      });
+  constructor() {
+    this.genAI = null;
+    this.visionModel = null;
+  }
 
-      console.log(`✅ Uploaded ${fileName} to blob storage`);
-      return {
-        blobName,
-        url: blockBlobClient.url
-      };
+  /**
+   * Initialize Gemini Vision for video analysis
+   */
+  async initializeVision() {
+    if (this.visionModel) return;
+
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        console.warn('⚠️  GEMINI_API_KEY not found, skipping vision analysis');
+        return;
+      }
+
+      this.genAI = new GoogleGenerativeAI(apiKey);
+      this.visionModel = this.genAI.getGenerativeModel({ 
+        model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp'
+      });
+      
+      console.log('✅ Gemini Vision initialized for video analysis');
     } catch (error) {
-      console.error('Error uploading to blob:', error);
-      throw error;
+      console.warn('⚠️  Could not initialize Gemini Vision:', error.message);
     }
   }
 
   /**
    * Extract text from document (PDF, DOCX, XLSX, images)
+   * NO AZURE - Uses GCP Vision Service
    */
   async extractText(fileBuffer, fileType) {
     try {
@@ -74,65 +87,19 @@ export class DocumentProcessor {
         pageCount = workbook.SheetNames.length;
       }
 
-      else if (
-        fileType === 'application/pdf' ||
-        fileType.startsWith('image/')
-      ) {
-        console.log('🧠 Using Azure Document Intelligence for PDF/image');
-        const poller = await docIntelligenceClient.beginAnalyzeDocument(
-          'prebuilt-document',
-          fileBuffer,
-          { contentType: fileType }
-        );
+      else if (fileType === 'application/pdf' || fileType.startsWith('image/')) {
+        console.log('🧠 Using Gemini Vision for PDF/image OCR');
+        const result = await gcpVisionService.analyzeDocument(fileBuffer, fileType);
+        extractedText = result.text || '';
+        pageCount = result.pageCount || 1;
 
-        const result = await poller.pollUntilDone();
-
-        if (result.paragraphs) {
-          extractedText = result.paragraphs.map(p => p.content).join('\n\n');
+        if (result.tables && result.tables.length > 0) {
+          tables = result.tables;
         }
-
-        if (result.tables) {
-          tables = result.tables.map(table => {
-            const rows = [];
-            let currentRow = [];
-            let currentRowIndex = -1;
-
-            table.cells.forEach(cell => {
-              if (cell.rowIndex !== currentRowIndex) {
-                if (currentRow.length > 0) {
-                  rows.push(currentRow);
-                }
-                currentRow = [];
-                currentRowIndex = cell.rowIndex;
-              }
-              currentRow.push(cell.content);
-            });
-
-            if (currentRow.length > 0) {
-              rows.push(currentRow);
-            }
-
-            return {
-              rowCount: table.rowCount,
-              columnCount: table.columnCount,
-              cells: rows
-            };
-          });
-
-          tables.forEach((table, index) => {
-            extractedText += `\n\n=== Table ${index + 1} ===\n`;
-            table.cells.forEach(row => {
-              extractedText += row.join(' | ') + '\n';
-            });
-          });
-        }
-
-        pageCount = result.pages ? result.pages.length : 0;
       }
 
       else if (fileType === 'video/mp4' || fileType === 'video/quicktime' || fileType === 'video/x-msvideo') {
         console.log('🎬 Processing video file...');
-        // For video files called from extractText, we need to create a file object
         const tempFile = {
           buffer: fileBuffer,
           originalname: 'video.' + (fileType === 'video/mp4' ? 'mp4' : fileType === 'video/quicktime' ? 'mov' : 'avi'),
@@ -168,13 +135,12 @@ export class DocumentProcessor {
       const { stdout } = await execAsync(`ffmpeg -i "${videoPath}" 2>&1`);
       return stdout.includes('Audio:');
     } catch (error) {
-      // FFmpeg returns non-zero exit code, but we can still check output
       return error.stdout && error.stdout.includes('Audio:');
     }
   }
 
   /**
-   * Extract frames from video for OCR analysis
+   * Extract frames from video for analysis
    */
   async extractFramesFromVideo(videoBuffer, originalFileName) {
     try {
@@ -193,24 +159,20 @@ export class DocumentProcessor {
         fs.mkdirSync(framesDir, { recursive: true });
       }
 
-      // Save video
       fs.writeFileSync(videoPath, videoBuffer);
 
-      // Extract 1 frame per second (adjust fps for more/fewer frames)
-      // -vf fps=1/5 means 1 frame every 5 seconds (adjust as needed)
+      // Extract 1 frame every 5 seconds
       const ffmpegCommand = `ffmpeg -i "${videoPath}" -vf fps=1/5 "${framesDir}/frame-%03d.jpg" -y`;
       
       console.log('🔧 Extracting frames with FFmpeg...');
       await execAsync(ffmpegCommand);
 
-      // Get all extracted frames
       const frameFiles = fs.readdirSync(framesDir)
         .filter(f => f.endsWith('.jpg'))
         .map(f => path.join(framesDir, f));
 
       console.log(`✅ Extracted ${frameFiles.length} frames`);
 
-      // Clean up video file
       try {
         fs.unlinkSync(videoPath);
       } catch (e) {
@@ -226,17 +188,115 @@ export class DocumentProcessor {
   }
 
   /**
-   * Perform OCR on video frames using Azure Document Intelligence
+   * Analyze video frames with Gemini Vision to describe actions and context
+   */
+  async analyzeFramesWithVision(frameFiles) {
+    try {
+      if (!this.visionModel) {
+        console.log('⏭️  Skipping vision analysis (Gemini Vision not initialized)');
+        return '';
+      }
+
+      console.log(`🎬 Analyzing video frames with Gemini Vision...`);
+
+      const maxFrames = 8;
+      const selectedFrames = this.selectKeyFrames(frameFiles, maxFrames);
+      
+      console.log(`   Analyzing ${selectedFrames.length} key frames for actions and context...`);
+
+      let visionText = '\n\n=== Video Visual Analysis (AI Vision) ===\n\n';
+      let frameDescriptions = [];
+
+      for (let i = 0; i < selectedFrames.length; i++) {
+        const framePath = selectedFrames[i];
+        
+        try {
+          const imageBuffer = fs.readFileSync(framePath);
+          const base64Image = imageBuffer.toString('base64');
+
+          const prompt = `Analyze this video frame and describe in 2-3 sentences:
+1. What actions or movements are happening
+2. What objects, equipment, or tools are visible
+3. The context or setting
+
+Be concise and focus on technical details if this appears technical.`;
+
+          const result = await this.visionModel.generateContent([
+            prompt,
+            {
+              inlineData: {
+                mimeType: 'image/jpeg',
+                data: base64Image,
+              },
+            },
+          ]);
+
+          const response = await result.response;
+          const description = response.text().trim();
+
+          frameDescriptions.push({
+            frame: i + 1,
+            description
+          });
+
+          console.log(`   ✅ Frame ${i + 1}/${selectedFrames.length} analyzed`);
+
+        } catch (frameError) {
+          console.warn(`   ⚠️  Frame ${i + 1} analysis failed:`, frameError.message);
+        }
+      }
+
+      if (frameDescriptions.length > 0) {
+        visionText += 'Video Content Description:\n\n';
+        frameDescriptions.forEach(({ frame, description }) => {
+          visionText += `Frame ${frame}: ${description}\n\n`;
+        });
+
+        console.log(`✅ Vision analysis complete: ${frameDescriptions.length} frames described`);
+        return visionText;
+      } else {
+        console.log('⚠️  No frames could be analyzed with vision');
+        return '';
+      }
+
+    } catch (error) {
+      console.error('❌ Error in vision analysis:', error);
+      return '';
+    }
+  }
+
+  /**
+   * Select key frames evenly distributed
+   */
+  selectKeyFrames(framePaths, maxFrames) {
+    if (framePaths.length <= maxFrames) {
+      return framePaths;
+    }
+
+    const step = Math.floor(framePaths.length / maxFrames);
+    const selectedFrames = [];
+
+    for (let i = 0; i < maxFrames; i++) {
+      const index = i * step;
+      if (index < framePaths.length) {
+        selectedFrames.push(framePaths[index]);
+      }
+    }
+
+    return selectedFrames;
+  }
+
+  /**
+   * Perform OCR on video frames using Gemini Vision
    */
   async performOCROnFrames(frameFiles) {
     try {
-      console.log(`📸 Performing OCR on ${frameFiles.length} frames...`);
+      console.log(`📸 Performing OCR on ${frameFiles.length} frames with Gemini Vision...`);
 
       let allText = '';
       let processedFrames = 0;
 
-      // Process frames (limit to avoid too many API calls)
-      const framesToProcess = frameFiles.slice(0, Math.min(frameFiles.length, 10)); // Max 10 frames
+      const framesToProcess = frameFiles.slice(0, Math.min(frameFiles.length, 10));
 
       for (const framePath of framesToProcess) {
         try {
@@ -244,16 +304,10 @@ export class DocumentProcessor {
           
           console.log(`🔍 OCR on frame ${processedFrames + 1}/${framesToProcess.length}...`);
 
-          const poller = await docIntelligenceClient.beginAnalyzeDocument(
-            'prebuilt-read',
-            frameBuffer,
-            { contentType: 'image/jpeg' }
-          );
+          const result = await gcpVisionService.extractTextFromImage(frameBuffer, 'image/jpeg');
 
-          const result = await poller.pollUntilDone();
-
-          if (result.content && result.content.trim().length > 0) {
-            allText += `\n\n=== Frame ${processedFrames + 1} ===\n${result.content}`;
+          if (result.text && result.text.trim().length > 0) {
+            allText += `\n\n=== Frame ${processedFrames + 1} ===\n${result.text}`;
             processedFrames++;
           }
 
@@ -268,7 +322,7 @@ export class DocumentProcessor {
 
     } catch (error) {
       console.error('Error performing OCR on frames:', error);
-      return ''; // Return empty string on error, don't fail entire process
+      return '';
     }
   }
 
@@ -288,15 +342,12 @@ export class DocumentProcessor {
       const videoPath = path.join(tempDir, `${videoId}-input.mp4`);
       const audioPath = path.join(tempDir, `${videoId}-audio.wav`);
 
-      // Save video
       fs.writeFileSync(videoPath, videoBuffer);
       
-      // Check if video has audio
       const hasAudio = await this.videoHasAudio(videoPath);
       
       if (!hasAudio) {
         console.log('⚠️ Video has no audio track');
-        // Clean up
         try {
           fs.unlinkSync(videoPath);
         } catch (e) {}
@@ -305,16 +356,13 @@ export class DocumentProcessor {
 
       console.log('✅ Video has audio track, extracting...');
 
-      // Extract audio
       const ffmpegCommand = `ffmpeg -i "${videoPath}" -vn -acodec pcm_s16le -ar 16000 -ac 1 -y "${audioPath}"`;
       
       await execAsync(ffmpegCommand);
       console.log(`✅ Audio extracted to: ${audioPath}`);
 
-      // Read audio file
       const audioBuffer = fs.readFileSync(audioPath);
 
-      // Clean up
       try {
         fs.unlinkSync(videoPath);
         fs.unlinkSync(audioPath);
@@ -327,56 +375,13 @@ export class DocumentProcessor {
 
     } catch (error) {
       console.error('Error extracting audio:', error);
-      return null; // Return null instead of throwing, we'll try visual analysis
+      return null;
     }
   }
 
   /**
-   * Transcribe audio using Azure Speech REST API
-   */
-  async transcribeAudioWithRestAPI(audioBuffer) {
-    try {
-      console.log(`🎤 Transcribing audio with REST API...`);
-
-      const speechKey = process.env.AZURE_SPEECH_KEY;
-      const speechRegion = process.env.AZURE_SPEECH_REGION;
-
-      if (!speechKey || !speechRegion) {
-        throw new Error('Azure Speech credentials not configured');
-      }
-
-      const endpoint = `https://${speechRegion}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`;
-
-      const response = await axios.post(endpoint, audioBuffer, {
-        headers: {
-          'Ocp-Apim-Subscription-Key': speechKey,
-          'Content-Type': 'audio/wav; codecs=audio/pcm; samplerate=16000',
-          'Accept': 'application/json'
-        },
-        params: {
-          'language': 'en-US',
-          'format': 'detailed'
-        },
-        timeout: 120000
-      });
-
-      if (response.data.RecognitionStatus === 'Success') {
-        const transcript = response.data.DisplayText;
-        console.log(`✅ Audio transcription: ${transcript.length} characters`);
-        return transcript;
-      } else {
-        console.log(`⚠️ Transcription status: ${response.data.RecognitionStatus}`);
-        return '';
-      }
-
-    } catch (error) {
-      console.error('Error transcribing audio:', error.message);
-      return ''; // Return empty string, don't fail
-    }
-  }
-
-  /**
-   * Process video comprehensively - audio + visual analysis
+   * Process video comprehensively - audio + OCR + AI vision analysis
+   * NO AZURE - Uses GCP Speech and Gemini Vision
    */
   async processVideo(file) {
     let framesDir = null;
@@ -384,54 +389,68 @@ export class DocumentProcessor {
     try {
       console.log(`🎬 Processing video: ${file.originalname}`);
 
-      // 1. Upload video to blob storage
-      const { blobName, url } = await this.uploadToBlob(file, file.originalname);
+      await this.initializeVision();
 
       let audioTranscript = '';
-      let visualText = '';
+      let ocrText = '';
+      let visionText = '';
 
-      // 2. Try audio transcription
+      // 1. Try audio transcription with GCP Speech
       console.log('🎵 Step 1: Attempting audio extraction...');
       const audioBuffer = await this.extractAudioFromVideo(file.buffer, file.originalname);
       
       if (audioBuffer) {
-        console.log('🎤 Step 2: Transcribing audio...');
-        audioTranscript = await this.transcribeAudioWithRestAPI(audioBuffer);
+        console.log('🎤 Step 2: Transcribing audio with Google Cloud Speech...');
+        const transcription = await gcpSpeechService.transcribeAudio(audioBuffer, {
+          encoding: 'LINEAR16',
+          sampleRate: 16000,
+          language: 'en-US'
+        });
+        audioTranscript = transcription.text || '';
       } else {
         console.log('⏭️ Skipping audio transcription (no audio track)');
       }
 
-      // 3. Extract frames and perform OCR
-      console.log('🎞️ Step 3: Extracting video frames for visual analysis...');
+      // 2. Extract frames
+      console.log('🎞️ Step 3: Extracting video frames for analysis...');
       const { frameFiles, framesDir: extractedFramesDir } = await this.extractFramesFromVideo(file.buffer, file.originalname);
       framesDir = extractedFramesDir;
 
       if (frameFiles && frameFiles.length > 0) {
+        // 3. Perform OCR on frames with Gemini Vision
         console.log('📸 Step 4: Performing OCR on video frames...');
-        visualText = await this.performOCROnFrames(frameFiles);
+        ocrText = await this.performOCROnFrames(frameFiles);
+
+        // 4. Analyze frames with Gemini Vision for actions and context
+        console.log('🎬 Step 5: Analyzing video content with AI Vision...');
+        visionText = await this.analyzeFramesWithVision(frameFiles);
       } else {
         console.log('⚠️ No frames extracted');
       }
 
-      // 4. Combine audio and visual text
+      // 5. Combine all content
       let combinedText = '';
       
       if (audioTranscript && audioTranscript.trim().length > 0) {
         combinedText += `=== Audio Transcript ===\n${audioTranscript}\n\n`;
       }
       
-      if (visualText && visualText.trim().length > 0) {
-        combinedText += `=== Visual Content (OCR from video frames) ===\n${visualText}`;
+      if (ocrText && ocrText.trim().length > 0) {
+        combinedText += `=== Visual Content (OCR from video frames) ===\n${ocrText}\n`;
       }
 
-      // If neither worked, create descriptive text
+      if (visionText && visionText.trim().length > 0) {
+        combinedText += visionText;
+      }
+
       if (combinedText.trim().length === 0) {
-        combinedText = `Video file: ${file.originalname}\n\nThis video was processed but contains no detectable audio or visible text. The video may contain:\n- Visual content without text\n- Silent animations or demonstrations\n- Content that requires manual review\n\nFile information:\n- Size: ${(file.size / (1024 * 1024)).toFixed(2)} MB\n- Format: ${file.mimetype}\n- Uploaded: ${new Date().toISOString()}`;
+        combinedText = `Video file: ${file.originalname}\n\nThis video was processed but contains no detectable audio or visible text.`;
       }
 
       console.log(`✅ Combined content: ${combinedText.length} characters`);
       console.log(`   - Audio: ${audioTranscript.length} chars`);
-      console.log(`   - Visual: ${visualText.length} chars`);
+      console.log(`   - OCR: ${ocrText.length} chars`);
+      console.log(`   - Vision: ${visionText.length} chars`);
 
       // Clean up frames
       if (framesDir) {
@@ -447,18 +466,13 @@ export class DocumentProcessor {
         }
       }
 
-      // 5. Chunk the combined text
       const chunks = this.chunkText(combinedText);
-
-      // 6. Detect language
       const language = this.detectLanguage(combinedText);
 
       return {
         id: uuidv4(),
         fileName: file.originalname,
         fileType: file.mimetype,
-        blobName,
-        blobUrl: url,
         text: combinedText,
         chunks,
         tables: [],
@@ -468,12 +482,12 @@ export class DocumentProcessor {
         chunkCount: chunks.length,
         isVideo: true,
         hasAudio: audioTranscript.length > 0,
-        hasVisualText: visualText.length > 0,
+        hasVisualText: ocrText.length > 0,
+        hasVisionAnalysis: visionText.length > 0,
         durationSeconds: null
       };
 
     } catch (error) {
-      // Clean up on error
       if (framesDir) {
         try {
           const frameFiles = fs.readdirSync(framesDir);
@@ -537,7 +551,6 @@ export class DocumentProcessor {
     try {
       console.log(`📄 Processing document: ${file.originalname}`);
       
-      const { blobName, url } = await this.uploadToBlob(file, file.originalname);
       const { text, tables, pageCount } = await this.extractText(file.buffer, file.mimetype);
       const language = this.detectLanguage(text);
       const chunks = this.chunkText(text);
@@ -546,8 +559,6 @@ export class DocumentProcessor {
         id: uuidv4(),
         fileName: file.originalname,
         fileType: file.mimetype,
-        blobName,
-        blobUrl: url,
         text,
         chunks,
         tables,
@@ -558,20 +569,6 @@ export class DocumentProcessor {
       };
     } catch (error) {
       console.error('Error processing document:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Delete document from blob storage
-   */
-  async deleteDocument(blobName) {
-    try {
-      const blockBlobClient = containerClient.getBlockBlobClient(blobName);
-      await blockBlobClient.delete();
-      console.log(`✅ Deleted ${blobName} from blob storage`);
-    } catch (error) {
-      console.error('Error deleting document:', error);
       throw error;
     }
   }
