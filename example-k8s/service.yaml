@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-app-service
+  namespace: rag-app
+  labels:
+    app: rag-app
+spec:
+  type: LoadBalancer
+  selector:
+    app: rag-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+      name: http
+  sessionAffinity: None

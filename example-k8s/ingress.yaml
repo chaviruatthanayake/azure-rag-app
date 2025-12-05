@@ -1,0 +1,33 @@
+# OPTIONAL: Use this if you want to expose the application via an Ingress
+# Requires NGINX Ingress Controller to be installed
+# See SETUP_GUIDE.md Step 12 for installation instructions
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rag-app-ingress
+  namespace: rag-app
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # Uncomment below for SSL/TLS
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  rules:
+  # Replace with your domain name
+  - host: rag-app.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: rag-app-service
+            port:
+              number: 80
+  # Uncomment below for SSL/TLS
+  # tls:
+  # - hosts:
+  #   - rag-app.yourdomain.com
+  #   secretName: rag-app-tls
