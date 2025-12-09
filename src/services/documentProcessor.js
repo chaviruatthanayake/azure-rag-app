@@ -6,53 +6,31 @@ import path from 'path';
 import { promisify } from 'util';
 import { exec } from 'child_process';
 import os from 'os';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { gcpVisionService } from './gcp/gcpVisionService.js';
+import Tesseract from 'tesseract.js';
 import { gcpSpeechService } from './gcp/gcpSpeechService.js';
+import { gcpDocumentAIService } from './gcp/gcpDocumentAI.js';
 
 const execAsync = promisify(exec);
 
 /**
- * Document Processor - 100% GCP (NO Azure)
+ * Document Processor - 100% GCP
  * Uses:
- * - Gemini Vision for PDF/image OCR
- * - Google Cloud Speech for audio transcription
- * - Gemini for video frame analysis
+ * - Google Cloud Document AI for PDF/image OCR
+ * - Cloud Speech-to-Text for audio transcription
+ * - Tesseract.js for video frame OCR
+ * - mammoth for DOCX
+ * - xlsx for Excel
+ * NO AZURE AT ALL!
  */
 export class DocumentProcessor {
   
   constructor() {
-    this.genAI = null;
-    this.visionModel = null;
+    // All GCP services
   }
 
   /**
-   * Initialize Gemini Vision for video analysis
-   */
-  async initializeVision() {
-    if (this.visionModel) return;
-
-    try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        console.warn('⚠️  GEMINI_API_KEY not found, skipping vision analysis');
-        return;
-      }
-
-      this.genAI = new GoogleGenerativeAI(apiKey);
-      this.visionModel = this.genAI.getGenerativeModel({ 
-        model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp'
-      });
-      
-      console.log('✅ Gemini Vision initialized for video analysis');
-    } catch (error) {
-      console.warn('⚠️  Could not initialize Gemini Vision:', error.message);
-    }
-  }
-
-  /**
-   * Extract text from document (PDF, DOCX, XLSX, images)
-   * NO AZURE - Uses GCP Vision Service
+   * Extract text from document (PDF, DOCX, XLSX, images, videos)
+   * 100% GCP + Open Source
    */
   async extractText(fileBuffer, fileType) {
     try {
@@ -87,14 +65,35 @@ export class DocumentProcessor {
         pageCount = workbook.SheetNames.length;
       }
 
-      else if (fileType === 'application/pdf' || fileType.startsWith('image/')) {
-        console.log('🧠 Using Gemini Vision for PDF/image OCR');
-        const result = await gcpVisionService.analyzeDocument(fileBuffer, fileType);
-        extractedText = result.text || '';
-        pageCount = result.pageCount || 1;
+      else if (fileType === 'application/pdf') {
+        console.log('📄 Using GCP Document AI for PDF extraction');
+        
+        try {
+          const result = await gcpDocumentAIService.extractTextFromPDF(fileBuffer);
+          extractedText = result.text;
+          pageCount = result.pageCount;
+          
+          console.log(`✅ Extracted ${extractedText.length} chars from ${pageCount} pages`);
+        } catch (docAIError) {
+          console.error('Error with Document AI:', docAIError);
+          extractedText = 'PDF could not be parsed with Document AI.';
+          pageCount = 1;
+        }
+      }
 
-        if (result.tables && result.tables.length > 0) {
-          tables = result.tables;
+      else if (fileType.startsWith('image/')) {
+        console.log('🖼️  Using GCP Document AI for image OCR');
+        
+        try {
+          const result = await gcpDocumentAIService.extractTextFromImage(fileBuffer, fileType);
+          extractedText = result.text;
+          pageCount = 1;
+          
+          console.log(`✅ Extracted ${extractedText.length} chars from image`);
+        } catch (docAIError) {
+          console.error('Error with Document AI:', docAIError);
+          extractedText = 'Image OCR failed with Document AI.';
+          pageCount = 1;
         }
       }
 
@@ -188,144 +187,30 @@ export class DocumentProcessor {
   }
 
   /**
-   * Analyze video frames with Gemini Vision to describe actions and context
+   * Perform OCR on video frames using Tesseract.js (open source)
    */
-  async analyzeFramesWithVision(frameFiles) {
+  async performDocumentAIOCR(frameFiles) {
+  console.log(`🔍 Performing OCR on ${frameFiles.length} frames with Document AI...`);
+
+  let allText = '';
+  let successfulFrames = 0;
+
+  for (let i = 0; i < frameFiles.length; i++) {
     try {
-      if (!this.visionModel) {
-        console.log('⏭️  Skipping vision analysis (Gemini Vision not initialized)');
-        return '';
-      }
-
-      console.log(`🎬 Analyzing video frames with Gemini Vision...`);
-
-      const maxFrames = 8;
-      const selectedFrames = this.selectKeyFrames(frameFiles, maxFrames);
+      const frameBuffer = fs.readFileSync(frameFiles[i]);
+      const result = await gcpDocumentAIService.extractTextFromImage(frameBuffer, 'image/jpeg');
       
-      console.log(`   Analyzing ${selectedFrames.length} key frames for actions and context...`);
-
-      let visionText = '\n\n=== Video Visual Analysis (AI Vision) ===\n\n';
-      let frameDescriptions = [];
-
-      for (let i = 0; i < selectedFrames.length; i++) {
-        const framePath = selectedFrames[i];
-        
-        try {
-          const imageBuffer = fs.readFileSync(framePath);
-          const base64Image = imageBuffer.toString('base64');
-
-          const prompt = `Analyze this video frame and describe in 2-3 sentences:
-1. What actions or movements are happening
-2. What objects, equipment, or tools are visible
-3. The context or setting
-
-Be concise and focus on technical details if this appears technical.`;
-
-          const result = await this.visionModel.generateContent([
-            prompt,
-            {
-              inlineData: {
-                mimeType: 'image/jpeg',
-                data: base64Image,
-              },
-            },
-          ]);
-
-          const response = await result.response;
-          const description = response.text().trim();
-
-          frameDescriptions.push({
-            frame: i + 1,
-            description
-          });
-
-          console.log(`   ✅ Frame ${i + 1}/${selectedFrames.length} analyzed`);
-
-        } catch (frameError) {
-          console.warn(`   ⚠️  Frame ${i + 1} analysis failed:`, frameError.message);
-        }
+      if (result.text && result.text.trim().length > 10) {
+        allText += `\n\n=== Frame ${i + 1} ===\n${result.text}`;
+        successfulFrames++;
       }
-
-      if (frameDescriptions.length > 0) {
-        visionText += 'Video Content Description:\n\n';
-        frameDescriptions.forEach(({ frame, description }) => {
-          visionText += `Frame ${frame}: ${description}\n\n`;
-        });
-
-        console.log(`✅ Vision analysis complete: ${frameDescriptions.length} frames described`);
-        return visionText;
-      } else {
-        console.log('⚠️  No frames could be analyzed with vision');
-        return '';
-      }
-
     } catch (error) {
-      console.error('❌ Error in vision analysis:', error);
-      return '';
+      console.warn(`Frame ${i + 1} failed:`, error.message);
     }
   }
 
-  /**
-   * Select key frames evenly distributed
-   */
-  selectKeyFrames(framePaths, maxFrames) {
-    if (framePaths.length <= maxFrames) {
-      return framePaths;
-    }
-
-    const step = Math.floor(framePaths.length / maxFrames);
-    const selectedFrames = [];
-
-    for (let i = 0; i < maxFrames; i++) {
-      const index = i * step;
-      if (index < framePaths.length) {
-        selectedFrames.push(framePaths[index]);
-      }
-    }
-
-    return selectedFrames;
-  }
-
-  /**
-   * Perform OCR on video frames using Gemini Vision
-   */
-  async performOCROnFrames(frameFiles) {
-    try {
-      console.log(`📸 Performing OCR on ${frameFiles.length} frames with Gemini Vision...`);
-
-      let allText = '';
-      let processedFrames = 0;
-
-      const framesToProcess = frameFiles.slice(0, Math.min(frameFiles.length, 10));
-
-      for (const framePath of framesToProcess) {
-        try {
-          const frameBuffer = fs.readFileSync(framePath);
-          
-          console.log(`🔍 OCR on frame ${processedFrames + 1}/${framesToProcess.length}...`);
-
-          const result = await gcpVisionService.extractTextFromImage(frameBuffer, 'image/jpeg');
-
-          if (result.text && result.text.trim().length > 0) {
-            allText += `\n\n=== Frame ${processedFrames + 1} ===\n${result.text}`;
-            processedFrames++;
-          }
-
-        } catch (frameError) {
-          console.warn(`⚠️ Could not process frame ${processedFrames + 1}:`, frameError.message);
-        }
-      }
-
-      console.log(`✅ OCR completed on ${processedFrames} frames, extracted ${allText.length} characters`);
-
-      return allText;
-
-    } catch (error) {
-      console.error('Error performing OCR on frames:', error);
-      return '';
-    }
-  }
-
+  return allText;
+}
   /**
    * Extract audio from video using FFmpeg
    */
@@ -380,8 +265,9 @@ Be concise and focus on technical details if this appears technical.`;
   }
 
   /**
-   * Process video comprehensively - audio + OCR + AI vision analysis
-   * NO AZURE - Uses GCP Speech and Gemini Vision
+   * Process video - audio + OCR
+   * Uses Cloud Speech-to-Text and Tesseract.js
+   * 100% GCP + Open Source
    */
   async processVideo(file) {
     let framesDir = null;
@@ -389,46 +275,41 @@ Be concise and focus on technical details if this appears technical.`;
     try {
       console.log(`🎬 Processing video: ${file.originalname}`);
 
-      await this.initializeVision();
-
       let audioTranscript = '';
       let ocrText = '';
-      let visionText = '';
 
-      // 1. Try audio transcription with GCP Speech
+      // 1. Try audio transcription with Cloud Speech-to-Text (up to 1 minute)
       console.log('🎵 Step 1: Attempting audio extraction...');
       const audioBuffer = await this.extractAudioFromVideo(file.buffer, file.originalname);
       
       if (audioBuffer) {
-        console.log('🎤 Step 2: Transcribing audio with Google Cloud Speech...');
-        const transcription = await gcpSpeechService.transcribeAudio(audioBuffer, {
-          encoding: 'LINEAR16',
-          sampleRate: 16000,
-          language: 'en-US'
-        });
-        audioTranscript = transcription.text || '';
+        const audioSize = audioBuffer.length;
+        const estimatedDuration = audioSize / (16000 * 2);
+        
+        if (estimatedDuration <= 60) {
+          console.log('🎤 Step 2: Transcribing audio with Cloud Speech-to-Text...');
+          const transcription = await gcpSpeechService.transcribeAudio(audioBuffer, 'LINEAR16', 16000, 'en-US');
+          audioTranscript = transcription || '';
+        } else {
+          console.log(`⏭️  Skipping audio transcription (estimated ${estimatedDuration.toFixed(1)}s > 60s limit)`);
+        }
       } else {
         console.log('⏭️ Skipping audio transcription (no audio track)');
       }
 
-      // 2. Extract frames
+      // 2. Extract frames and perform OCR with Tesseract
       console.log('🎞️ Step 3: Extracting video frames for analysis...');
       const { frameFiles, framesDir: extractedFramesDir } = await this.extractFramesFromVideo(file.buffer, file.originalname);
       framesDir = extractedFramesDir;
 
       if (frameFiles && frameFiles.length > 0) {
-        // 3. Perform OCR on frames with Gemini Vision
-        console.log('📸 Step 4: Performing OCR on video frames...');
-        ocrText = await this.performOCROnFrames(frameFiles);
-
-        // 4. Analyze frames with Gemini Vision for actions and context
-        console.log('🎬 Step 5: Analyzing video content with AI Vision...');
-        visionText = await this.analyzeFramesWithVision(frameFiles);
+        console.log('📸 Step 4: Performing OCR on video frames (open source Tesseract)...');
+        ocrText = await this.performDocumentAIOCR(frameFiles);
       } else {
         console.log('⚠️ No frames extracted');
       }
 
-      // 5. Combine all content
+      // 3. Combine all content
       let combinedText = '';
       
       if (audioTranscript && audioTranscript.trim().length > 0) {
@@ -439,18 +320,11 @@ Be concise and focus on technical details if this appears technical.`;
         combinedText += `=== Visual Content (OCR from video frames) ===\n${ocrText}\n`;
       }
 
-      if (visionText && visionText.trim().length > 0) {
-        combinedText += visionText;
-      }
-
       if (combinedText.trim().length === 0) {
-        combinedText = `Video file: ${file.originalname}\n\nThis video was processed but contains no detectable audio or visible text.`;
+        combinedText = `Video file: ${file.originalname}\n\nThis video was processed but contains no detectable audio (or audio > 60s) and no visible text in frames.`;
       }
 
       console.log(`✅ Combined content: ${combinedText.length} characters`);
-      console.log(`   - Audio: ${audioTranscript.length} chars`);
-      console.log(`   - OCR: ${ocrText.length} chars`);
-      console.log(`   - Vision: ${visionText.length} chars`);
 
       // Clean up frames
       if (framesDir) {
@@ -483,7 +357,6 @@ Be concise and focus on technical details if this appears technical.`;
         isVideo: true,
         hasAudio: audioTranscript.length > 0,
         hasVisualText: ocrText.length > 0,
-        hasVisionAnalysis: visionText.length > 0,
         durationSeconds: null
       };
 

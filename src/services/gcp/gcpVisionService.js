@@ -1,13 +1,13 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { VertexAI } from '@google-cloud/vertexai';
 
 /**
  * GCP Vision Service
- * Replaces Azure Document Intelligence with Gemini Vision API
+ * Uses Vertex AI Gemini (with GCP credits - NO rate limits!)
  * Handles PDF, images, and document OCR
  */
 class GCPVisionService {
   constructor() {
-    this.genAI = null;
+    this.vertexAI = null;
     this.model = null;
     this.initialized = false;
   }
@@ -16,18 +16,27 @@ class GCPVisionService {
     if (this.initialized) return;
 
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error('GEMINI_API_KEY not found in environment');
+      const projectId = process.env.GCP_PROJECT_ID;
+      const location = process.env.GCP_REGION || 'us-central1';
+
+      if (!projectId) {
+        throw new Error('GCP_PROJECT_ID not found in environment');
       }
 
-      this.genAI = new GoogleGenerativeAI(apiKey);
-      this.model = this.genAI.getGenerativeModel({ 
-        model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp'
+      // Initialize Vertex AI (uses Application Default Credentials or GOOGLE_APPLICATION_CREDENTIALS)
+      this.vertexAI = new VertexAI({
+        project: projectId,
+        location: location
+      });
+
+      // Use Gemini 1.5 Flash for vision tasks (stable and fast)
+      this.model = this.vertexAI.getGenerativeModel({
+        model: 'gemini-1.5-flash-001'
       });
 
       this.initialized = true;
-      console.log('✅ GCP Vision Service initialized');
+      console.log('✅ GCP Vision Service initialized (Vertex AI)');
+      console.log(`   Project: ${projectId}, Region: ${location}`);
     } catch (error) {
       console.error('❌ Error initializing GCP Vision:', error);
       throw error;
@@ -35,24 +44,13 @@ class GCPVisionService {
   }
 
   /**
-   * Sleep/delay function for rate limiting
-   */
-  async sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  /**
-   * Extract text from image using Gemini Vision with rate limiting
+   * Extract text from image using Vertex AI Gemini (NO rate limits with credits!)
    */
   async extractTextFromImage(imageBuffer, mimeType = 'image/jpeg') {
     try {
       if (!this.initialized) {
         await this.initialize();
       }
-
-      // Add 8 second delay between API calls (7.5 requests/minute = safe)
-      console.log('   ⏳ Waiting 8s to avoid rate limits...');
-      await this.sleep(8000);
 
       const base64Image = imageBuffer.toString('base64');
 
@@ -64,18 +62,26 @@ class GCPVisionService {
 
 Return ONLY the extracted text, nothing else.`;
 
-      const result = await this.model.generateContent([
-        prompt,
-        {
-          inlineData: {
-            mimeType: mimeType,
-            data: base64Image,
+      const request = {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType: mimeType,
+                  data: base64Image,
+                },
+              },
+            ],
           },
-        },
-      ]);
+        ],
+      };
 
-      const response = await result.response;
-      const text = response.text().trim();
+      const result = await this.model.generateContent(request);
+      const response = result.response;
+      const text = response.candidates[0].content.parts[0].text.trim();
 
       return {
         text: text === 'No text found' ? '' : text,
@@ -90,8 +96,7 @@ Return ONLY the extracted text, nothing else.`;
   }
 
   /**
-   * Extract text from PDF by converting to images
-   * Note: This is a simplified version. For production, consider using pdf-parse or similar
+   * Extract text from PDF using Vertex AI Gemini
    */
   async extractTextFromPDF(pdfBuffer) {
     try {
@@ -99,8 +104,6 @@ Return ONLY the extracted text, nothing else.`;
         await this.initialize();
       }
 
-      // For PDFs, we'll use a simpler approach with Gemini
-      // Convert PDF buffer to base64 and let Gemini handle it
       const base64PDF = pdfBuffer.toString('base64');
 
       const prompt = `Extract ALL text content from this PDF document.
@@ -111,18 +114,26 @@ Return ONLY the extracted text, nothing else.`;
 
 Return the complete text content.`;
 
-      const result = await this.model.generateContent([
-        prompt,
-        {
-          inlineData: {
-            mimeType: 'application/pdf',
-            data: base64PDF,
+      const request = {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType: 'application/pdf',
+                  data: base64PDF,
+                },
+              },
+            ],
           },
-        },
-      ]);
+        ],
+      };
 
-      const response = await result.response;
-      const text = response.text().trim();
+      const result = await this.model.generateContent(request);
+      const response = result.response;
+      const text = response.candidates[0].content.parts[0].text.trim();
 
       // Estimate page count from content
       const pageCount = (text.match(/Page \d+/gi) || []).length || 1;
@@ -138,7 +149,7 @@ Return the complete text content.`;
       console.error('❌ Error extracting text from PDF:', error);
       // Fallback: return basic info
       return {
-        text: 'PDF processing requires additional setup. Please install pdf-parse package.',
+        text: 'PDF processing error. Please check your Vertex AI setup.',
         pageCount: 0,
         paragraphs: [],
         tables: []
@@ -194,21 +205,28 @@ For each table:
 
 If no tables, return "No tables found".`;
 
-      const result = await this.model.generateContent([
-        prompt,
-        {
-          inlineData: {
-            mimeType: mimeType,
-            data: base64Data,
+      const request = {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType: mimeType,
+                  data: base64Data,
+                },
+              },
+            ],
           },
-        },
-      ]);
+        ],
+      };
 
-      const response = await result.response;
-      const text = response.text().trim();
+      const result = await this.model.generateContent(request);
+      const response = result.response;
+      const text = response.candidates[0].content.parts[0].text.trim();
 
       // Parse tables from response
-      // This is a simplified version - enhance based on your needs
       const tables = [];
       if (!text.includes('No tables found')) {
         tables.push({

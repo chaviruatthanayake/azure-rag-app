@@ -320,7 +320,7 @@ class DriveSyncService {
 
       // 9. Index in Azure Search
       console.log(`🔍 Indexing ${fileName} in Azure AI Search...`);
-      await searchService.indexDocument(fileId, textToIndex, {
+      await searchService.indexDocument(fileId, textToIndex, embeddings, {
   fileName: fileName,
   fileType: mimeType,
   language: language,

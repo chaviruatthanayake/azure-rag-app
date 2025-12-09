@@ -1,29 +1,18 @@
-import { hybridGCPService } from './gcp/hybridGCPService.js';
+import { gcpEmbeddingService } from './gcp/gcpEmbeddingService.js';
 
 /**
- * Embedding Service - Now uses Vertex AI
+ * Embedding Service Wrapper
+ * Uses GCP Vertex AI embeddings
  */
 class EmbeddingService {
-  async initialize() {
-    return await hybridGCPService.initialize();
-  }
-
+  // No initialize needed - gcpEmbeddingService handles it internally
+  
   async generateEmbedding(text) {
-    return await hybridGCPService.generateEmbeddings(text);
+    return await gcpEmbeddingService.generateEmbedding(text);
   }
 
-  // Alias for compatibility - handles both single text and arrays
   async generateEmbeddings(texts) {
-    // If single text, return single embedding
-    if (typeof texts === 'string') {
-      return await this.generateEmbedding(texts);
-    }
-    // If array, generate batch
-    return await hybridGCPService.generateEmbeddingsBatch(texts);
-  }
-
-  async generateEmbeddingsBatch(texts) {
-    return await hybridGCPService.generateEmbeddingsBatch(texts);
+    return await gcpEmbeddingService.generateEmbeddings(texts);
   }
 }
 

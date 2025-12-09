@@ -1,8 +1,9 @@
-import { v2 } from '@google-cloud/translate';
+import { Translate } from '@google-cloud/translate/build/src/v2/index.js';
 
 /**
  * GCP Translation Service
- * Replaces Azure Translator with Google Cloud Translation API
+ * Uses Cloud Translation API (with your $300 credits!)
+ * Supports 100+ languages
  */
 class GCPTranslationService {
   constructor() {
@@ -14,12 +15,13 @@ class GCPTranslationService {
     if (this.initialized) return;
 
     try {
-      console.log('🔧 Initializing GCP Translation Service...');
-
-      this.translate = new v2.Translate();
+      // Initialize Cloud Translation client
+      this.translate = new Translate({
+        projectId: process.env.GCP_PROJECT_ID
+      });
 
       this.initialized = true;
-      console.log('✅ GCP Translation Service initialized');
+      console.log('✅ GCP Translation Service initialized (Cloud Translation API)');
     } catch (error) {
       console.error('❌ Error initializing GCP Translation:', error);
       throw error;
@@ -36,151 +38,109 @@ class GCPTranslationService {
       }
 
       if (!text || text.trim().length === 0) {
-        return 'en';
+        return 'en'; // Default to English
       }
 
       const [detection] = await this.translate.detect(text);
-      
-      console.log(`🌍 Detected language: ${detection.language}`);
-      
-      return detection.language;
+      const languageCode = detection.language;
+
+      console.log(`🌍 Detected language: ${languageCode}`);
+
+      return languageCode;
 
     } catch (error) {
       console.error('❌ Error detecting language:', error);
-      return 'en'; // Default to English
+      return 'en'; // Fallback to English
     }
   }
 
   /**
-   * Translate text to target language
+   * Translate text to English
    */
-  async translateText(text, targetLanguage, sourceLanguage = null) {
+  async translateToEnglish(text, sourceLanguage = null) {
     try {
       if (!this.initialized) {
         await this.initialize();
       }
 
       if (!text || text.trim().length === 0) {
-        return {
-          translatedText: text,
-          detectedSourceLanguage: sourceLanguage || 'en',
-          wasTranslated: false
-        };
+        return { translatedText: '', sourceLanguage: 'en' };
       }
 
-      console.log(`🌐 Translating from ${sourceLanguage || 'auto'} to ${targetLanguage}...`);
-
-      const options = {
-        to: targetLanguage,
-      };
-
-      if (sourceLanguage) {
-        options.from = sourceLanguage;
-      }
-
-      const [translation] = await this.translate.translate(text, options);
-
-      return {
-        translatedText: translation,
-        detectedSourceLanguage: sourceLanguage || 'auto',
-        wasTranslated: true
-      };
-
-    } catch (error) {
-      console.error('❌ Error translating text:', error);
-      return {
-        translatedText: text,
-        detectedSourceLanguage: sourceLanguage || 'unknown',
-        wasTranslated: false,
-        error: error.message
-      };
-    }
-  }
-
-  /**
-   * Translate to English (common use case)
-   */
-  async translateToEnglish(text, sourceLanguage = null) {
-    try {
-      // If already English, don't translate
+      // Detect language if not provided
       if (!sourceLanguage) {
         sourceLanguage = await this.detectLanguage(text);
       }
 
+      // If already English, return as is
       if (sourceLanguage === 'en') {
-        console.log('⏭️  Text already in English, skipping translation');
         return {
           translatedText: text,
-          detectedSourceLanguage: 'en',
-          wasTranslated: false
+          sourceLanguage: 'en',
+          translated: false
         };
       }
 
-      console.log(`🌐 Translating from ${sourceLanguage} to English...`);
+      console.log(`🌍 Translating from ${sourceLanguage} to English...`);
 
-      // For long texts, translate in chunks
-      if (text.length > 5000) {
-        return await this.translateLongText(text, 'en', sourceLanguage);
-      }
+      const [translation] = await this.translate.translate(text, {
+        from: sourceLanguage,
+        to: 'en'
+      });
 
-      const result = await this.translateText(text, 'en', sourceLanguage);
-      
-      console.log(`✅ Translated ${text.length} chars from ${sourceLanguage} to English`);
-      
-      return result;
+      console.log(`✅ Translation complete (${translation.length} chars)`);
+
+      return {
+        translatedText: translation,
+        sourceLanguage: sourceLanguage,
+        translated: true
+      };
 
     } catch (error) {
       console.error('❌ Error translating to English:', error);
+      // Return original text on error
       return {
         translatedText: text,
-        detectedSourceLanguage: sourceLanguage || 'unknown',
-        wasTranslated: false,
+        sourceLanguage: sourceLanguage || 'unknown',
+        translated: false,
         error: error.message
       };
     }
   }
 
   /**
-   * Translate long text in chunks
+   * Translate text to target language
    */
-  async translateLongText(text, targetLanguage, sourceLanguage = null) {
+  async translateFromEnglish(text, targetLanguage) {
     try {
-      const chunkSize = 4000; // Safe chunk size
-      const chunks = [];
-
-      // Split into chunks
-      for (let i = 0; i < text.length; i += chunkSize) {
-        chunks.push(text.substring(i, i + chunkSize));
+      if (!this.initialized) {
+        await this.initialize();
       }
 
-      console.log(`   Translating ${chunks.length} chunks...`);
-
-      const translatedChunks = [];
-
-      for (let i = 0; i < chunks.length; i++) {
-        console.log(`   Translating chunk ${i + 1}/${chunks.length}...`);
-        const result = await this.translateText(chunks[i], targetLanguage, sourceLanguage);
-        translatedChunks.push(result.translatedText);
+      if (!text || text.trim().length === 0) {
+        return text;
       }
 
-      const translatedText = translatedChunks.join('');
+      // If target is English, return as is
+      if (targetLanguage === 'en') {
+        return text;
+      }
 
-      console.log(`✅ Translated ${text.length} chars from ${sourceLanguage} to ${targetLanguage}`);
+      console.log(`🌍 Translating from English to ${targetLanguage}...`);
 
-      return {
-        translatedText,
-        detectedSourceLanguage: sourceLanguage || 'auto',
-        wasTranslated: true
-      };
+      const [translation] = await this.translate.translate(text, {
+        from: 'en',
+        to: targetLanguage
+      });
+
+      console.log(`✅ Translation complete (${translation.length} chars)`);
+
+      return translation;
 
     } catch (error) {
-      console.error('❌ Error translating long text:', error);
-      return {
-        translatedText: text,
-        detectedSourceLanguage: sourceLanguage || 'unknown',
-        wasTranslated: false,
-        error: error.message
-      };
+      console.error('❌ Error translating from English:', error);
+      // Return original text on error
+      return text;
     }
   }
 
@@ -194,7 +154,11 @@ class GCPTranslationService {
       }
 
       const [languages] = await this.translate.getLanguages();
-      return languages;
+      
+      return languages.map(lang => ({
+        code: lang.code,
+        name: lang.name
+      }));
 
     } catch (error) {
       console.error('❌ Error getting supported languages:', error);
@@ -203,52 +167,37 @@ class GCPTranslationService {
   }
 
   /**
-   * Get language name from code
+   * Language code to name mapping
    */
-  getLanguageName(languageCode) {
+  getLanguageName(code) {
     const languageNames = {
       'en': 'English',
+      'zh': 'Chinese',
+      'zh-CN': 'Chinese (Simplified)',
+      'zh-TW': 'Chinese (Traditional)',
       'es': 'Spanish',
       'fr': 'French',
       'de': 'German',
       'it': 'Italian',
       'pt': 'Portuguese',
-      'ru': 'Russian',
       'ja': 'Japanese',
       'ko': 'Korean',
-      'zh': 'Chinese',
-      'zh-Hans': 'Chinese (Simplified)',
-      'zh-Hant': 'Chinese (Traditional)',
       'ar': 'Arabic',
+      'ru': 'Russian',
       'hi': 'Hindi',
-      'tr': 'Turkish',
-      'nl': 'Dutch',
-      'pl': 'Polish',
-      'sv': 'Swedish',
-      'da': 'Danish',
-      'fi': 'Finnish',
-      'no': 'Norwegian',
-      'cs': 'Czech',
-      'hu': 'Hungarian',
-      'ro': 'Romanian',
-      'th': 'Thai',
+      'ta': 'Tamil',
+      'te': 'Telugu',
       'vi': 'Vietnamese',
+      'th': 'Thai',
       'id': 'Indonesian',
       'ms': 'Malay',
-      'uk': 'Ukrainian',
-      'he': 'Hebrew',
-      'el': 'Greek',
-      'bg': 'Bulgarian',
-      'sr': 'Serbian',
-      'hr': 'Croatian',
-      'sk': 'Slovak',
-      'sl': 'Slovenian',
-      'lt': 'Lithuanian',
-      'lv': 'Latvian',
-      'et': 'Estonian'
+      'tr': 'Turkish',
+      'pl': 'Polish',
+      'nl': 'Dutch',
+      'sv': 'Swedish'
     };
 
-    return languageNames[languageCode] || languageCode;
+    return languageNames[code] || code;
   }
 }
 

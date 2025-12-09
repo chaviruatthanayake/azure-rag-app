@@ -8,6 +8,8 @@ import { documentProcessor } from './services/documentProcessor.js';
 import { embeddingService } from './services/embeddingService.js';
 import { searchService } from './services/searchService.js';
 import { ragService } from './services/ragService.js';
+import dotenv from 'dotenv';
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -121,19 +123,19 @@ app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
 // List all documents
 app.get('/api/documents', async (req, res) => {
   try {
+    console.log('📋 Fetching all documents from Cloud SQL...');
     const documents = await searchService.getAllDocuments();
     
     res.json({
       success: true,
       count: documents.length,
-      documents
+      documents: documents
     });
   } catch (error) {
-    console.error('Error listing documents:', error);
+    console.error('Error fetching documents:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to list documents',
-      message: error.message
+      error: error.message
     });
   }
 });
@@ -472,12 +474,13 @@ app.listen(PORT, async () => {
   console.log('   GET  /api/documents         - List documents');
   console.log('   DELETE /api/documents/:name - Delete document');
   console.log('   DELETE /api/documents       - Delete all documents');
-  console.log('==========================================');
+console.log('==========================================');
   console.log('🔧 Configuration:');
   console.log(`   Google Drive: ${googleDriveAvailable && process.env.GOOGLE_DRIVE_FOLDER_ID ? '✅ Configured' : '❌ Not configured'}`);
-  console.log(`   Azure OpenAI: ${process.env.AZURE_OPENAI_API_KEY ? '✅ Connected' : '❌ Not configured'}`);
-  console.log(`   Gemini AI: ${process.env.GEMINI_API_KEY ? '✅ Connected' : '❌ Not configured'}`);
-  console.log(`   Azure Search: ${process.env.AZURE_SEARCH_API_KEY ? '✅ Connected' : '❌ Not configured'}`);
+  console.log(`   GCP Project: ${process.env.GCP_PROJECT_ID ? '✅ ' + process.env.GCP_PROJECT_ID : '❌ Not configured'}`);
+  console.log(`   GCP Region: ${process.env.GCP_REGION ? '✅ ' + process.env.GCP_REGION : '❌ Not configured'}`);
+  console.log(`   GCP Services: ${process.env.GOOGLE_APPLICATION_CREDENTIALS ? '✅ Authenticated' : '❌ Not configured'}`);
+  console.log(`   Vector Search: ${process.env.USE_GCP_SEARCH === 'true' ? '✅ GCP' : '⚠️ Azure Search'}`);
   console.log('==========================================');
 
   // Auto-sync on startup if Google Drive is configured
