@@ -1,8 +1,8 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 /**
- * GCP Embedding Service - Using Gemini Embedding Model
- * Uses the same API key as Gemini chat (100% FREE)
+ * GCP Embedding Service - Using Gemini Embedding 001
+ * This is the official "Google model" from Model Garden
  */
 export class GCPEmbeddingService {
   constructor() {
@@ -23,7 +23,7 @@ export class GCPEmbeddingService {
       this.genAI = new GoogleGenerativeAI(apiKey);
 
       console.log('✅ GCP Embedding Service initialized (Gemini)');
-      console.log(`   Model: text-embedding-004 (768-dim, FREE)`);
+      console.log(`   Model: models/embedding-001 (768-dim, Google Model Garden)`);
 
       this.initialized = true;
     } catch (error) {
@@ -33,7 +33,7 @@ export class GCPEmbeddingService {
   }
 
   /**
-   * Generate embedding using Gemini API
+   * Generate embedding using Gemini Embedding 001
    */
   async generateEmbedding(text) {
     await this.initialize();
@@ -47,8 +47,8 @@ export class GCPEmbeddingService {
       const maxLength = 10000;
       const truncatedText = text.length > maxLength ? text.substring(0, maxLength) : text;
 
-      // Use Gemini's embedding model
-      const model = this.genAI.getGenerativeModel({ model: 'text-embedding-004' });
+      // Use Gemini Embedding 001 model (the one visible in Model Garden)
+      const model = this.genAI.getGenerativeModel({ model: 'models/embedding-001' });
 
       const result = await model.embedContent(truncatedText);
       const embedding = result.embedding.values;
@@ -75,7 +75,7 @@ export class GCPEmbeddingService {
         throw new Error('Texts must be an array');
       }
 
-      console.log(`🔢 Generating ${texts.length} embeddings using Gemini...`);
+      console.log(`🔢 Generating ${texts.length} embeddings using Gemini Embedding 001...`);
 
       const embeddings = [];
 

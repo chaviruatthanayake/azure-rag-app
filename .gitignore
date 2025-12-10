@@ -3,4 +3,4 @@ node_modules
 package-lock.json
 .sync-cache.json
 k8s/
-delete.json
+delete.js

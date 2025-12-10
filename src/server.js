@@ -91,8 +91,7 @@ app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
       }))
     };
 
-    // Index in Azure Search
-    console.log(`🔍 Indexing document in Azure AI Search...`);
+    console.log(`🔍 Indexing document in SQL...`);
     await searchService.indexDocument(document);
 
     console.log(`✅ Successfully processed and indexed: ${req.file.originalname}`);
