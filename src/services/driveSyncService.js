@@ -86,10 +86,10 @@ class DriveSyncService {
       };
 
       // 1. Get already indexed documents from Azure Search
-      console.log('📊 Checking already indexed documents in Azure Search...');
+      console.log('📊 Checking already indexed documents in Vector DB...');
       const indexedDocs = await searchService.getAllDocuments();
       const indexedFileNames = new Set(indexedDocs.map(doc => doc.fileName));
-      console.log(`✅ Found ${indexedFileNames.size} documents already in Azure Search`);
+      console.log(`✅ Found ${indexedFileNames.size} documents already in Vector DB`);
       
       // Build a map of fileName -> uploadDate for Azure documents
       const azureFileMap = new Map();
@@ -119,7 +119,7 @@ class DriveSyncService {
           if (alreadyIndexed) {
             // If in cache with same modified time -> definitely skip
             if (cachedFile && cachedFile.modifiedTime === driveFile.modifiedTime) {
-              console.log(`⏭️ Skipping ${driveFile.name} (already in Azure, not modified)`);
+              console.log(`⏭️ Skipping ${driveFile.name} (already in Database, not modified)`);
               results.skipped++;
               results.files.push({
                 fileName: driveFile.name,
@@ -132,7 +132,7 @@ class DriveSyncService {
             
             // If NOT in cache but IS in Azure -> add to cache and skip (first run after restart)
             if (!cachedFile) {
-              console.log(`⏭️ Skipping ${driveFile.name} (found in Azure, adding to cache)`);
+              console.log(`⏭️ Skipping ${driveFile.name} (found in Database, adding to cache)`);
               this.syncedFiles.set(driveFile.id, {
                 name: driveFile.name,
                 modifiedTime: driveFile.modifiedTime,
@@ -319,7 +319,7 @@ class DriveSyncService {
       }
 
       // 9. Index in Azure Search
-      console.log(`🔍 Indexing ${fileName} in Azure AI Search...`);
+      console.log(`🔍 Indexing ${fileName} in  Vector DB...`);
       await searchService.indexDocument(fileId, textToIndex, embeddings, {
   fileName: fileName,
   fileType: mimeType,

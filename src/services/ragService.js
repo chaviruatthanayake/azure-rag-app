@@ -73,12 +73,16 @@ class RAGService {
   }
 
   /**
-   * Main method to generate answers - 100% GCP
+   * Main method to generate answers - 100% GCP with web search fallback
    */
-  async generateAnswer(question, language = 'english') {
+  async generateAnswer(question, language = 'english', embeddingService = null, searchServiceParam = null) {
     try {
       console.log(`💬 Generating answer for: "${question}"`);
       console.log(`🔧 Using: Vertex AI (embeddings) + Vertex AI Gemini (chat)`);
+
+      // Use passed services or defaults
+      const embedSvc = embeddingService || gcpEmbeddingService;
+      const searchSvc = searchServiceParam || searchService;
 
       // 1. Detect question language using Cloud Translation
       const questionLanguage = await gcpTranslationService.detectLanguage(question);
@@ -109,10 +113,10 @@ class RAGService {
 
       // 4. Generate embedding using Vertex AI
       console.log(`🔢 Generating embedding with Vertex AI...`);
-      const questionEmbedding = await gcpEmbeddingService.generateEmbedding(searchQuestion);
+      const questionEmbedding = await embedSvc.generateEmbedding(searchQuestion);
       
       // 5. Search for relevant documents
-      let searchResults = await searchService.searchDocuments(questionEmbedding, { top: 10 });
+      let searchResults = await searchSvc.searchDocuments(questionEmbedding, { top: 10 });
 
       // 6. Filter to specific file if mentioned
       if (fileNameMatch && searchResults.length > 0) {
@@ -152,7 +156,7 @@ class RAGService {
         
         if (asksAboutVideos && !hasVideos) {
           console.log('📹 Question is about videos but search didn\'t find any, getting all videos...');
-          const videoFiles = await searchService.getDocumentsByFileType('video');
+          const videoFiles = await searchSvc.getDocumentsByFileType('video');
           if (videoFiles.length > 0) {
             console.log(`✅ Found ${videoFiles.length} video files with content`);
             searchResults = [...videoFiles.slice(0, 5), ...searchResults.slice(0, 5)];
@@ -161,7 +165,7 @@ class RAGService {
         
         if (asksAboutImages && !hasImages) {
           console.log('🖼️ Question is about images but search didn\'t find any, getting all images...');
-          const imageFiles = await searchService.getDocumentsByFileType('image');
+          const imageFiles = await searchSvc.getDocumentsByFileType('image');
           if (imageFiles.length > 0) {
             console.log(`✅ Found ${imageFiles.length} image files with content`);
             searchResults = [...imageFiles.slice(0, 5), ...searchResults.slice(0, 5)];
@@ -172,8 +176,10 @@ class RAGService {
       if (searchResults.length === 0) {
         return {
           answer: 'No relevant documents found. Please upload documents first or sync from Google Drive.',
+          source: 'system',
           sources: [],
           usedGemini: true,
+          usedInternetSearch: false,
           model: 'gemini-2.0-flash-exp',
           language: questionLanguage
         };
@@ -182,10 +188,8 @@ class RAGService {
       console.log(`📚 Building context from ${searchResults.length} unique documents...`);
 
       // 8. Build context from search results
-      // CRITICAL FIX: Access content from doc.document.content (nested structure)
       const context = searchResults
         .map((result, idx) => {
-          // Search results have structure: { score: 0.95, document: { content: "...", fileName: "..." } }
           const doc = result.document || result;
           const content = doc.content || doc.text || '';
           const fileName = doc.fileName || 'Unknown';
@@ -208,23 +212,48 @@ class RAGService {
 
       console.log(`📝 Context built: ${context.length} characters from ${searchResults.length} sources`);
 
-      // 9. Generate answer with Gemini (in English)
+      // 9. Generate answer with Gemini (in English) - with web search fallback
       console.log(`🤖 Generating answer with Gemini...`);
-      const answer = await gcpChatService.generateAnswer(searchQuestion, context);
+      
+      // Get unique sources for web search saving
+      const sources = searchResults.slice(0, 5).map(r => r.document || r);
+      
+      // Call chatService with web search capability
+      const answerResult = await gcpChatService.generateAnswer(
+        searchQuestion, 
+        context,
+        [], // conversation history
+        sources, // sources for relevance check
+        embedSvc, // for saving web results
+        searchSvc // for indexing web results
+      );
+
+      // Extract answer text (handle both string and object responses)
+      let answerText;
+      let answerSource = 'documents';
+      
+      if (typeof answerResult === 'object' && answerResult.answer) {
+        answerText = answerResult.answer;
+        answerSource = answerResult.source || 'documents';
+      } else {
+        answerText = answerResult;
+      }
 
       // 10. Translate answer back to user's language if needed
-      let finalAnswer = answer;
+      let finalAnswer = answerText;
       if (questionLanguage !== 'en') {
         console.log(`🌐 Translating answer to ${gcpTranslationService.getLanguageName(questionLanguage)}...`);
-        finalAnswer = await gcpTranslationService.translateFromEnglish(answer, questionLanguage);
+        finalAnswer = await gcpTranslationService.translateFromEnglish(answerText, questionLanguage);
         console.log(`✅ Answer translated to user's language`);
       }
 
       // 11. Return result with sources properly formatted
       return {
         answer: finalAnswer,
-        sources: searchResults.slice(0, 5).map(r => r.document || r),
+        source: answerSource, // 'documents' or 'web_search'
+        sources: sources,
         usedGemini: true,
+        usedInternetSearch: answerSource === 'web_search',
         model: 'gemini-2.0-flash-exp',
         language: questionLanguage,
         translatedFrom: questionLanguage !== 'en' ? 'en' : null,

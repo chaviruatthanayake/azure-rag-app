@@ -220,14 +220,21 @@ app.post('/api/query', async (req, res) => {
 
     console.log(`💬 Processing query: "${question}"`);
 
-    const result = await ragService.generateAnswer(question, language);
+    // Pass embeddingService and searchService for web search fallback
+    const result = await ragService.generateAnswer(
+      question, 
+      language,
+      embeddingService,  // ← ADD THIS
+      searchService       // ← ADD THIS
+    );
 
     res.json({
       success: true,
       question,
       answer: result.answer,
       sources: result.sources,
-      usedInternetSearch: result.usedInternetSearch || false,
+      source: result.source || 'documents',  // ← ADD THIS (documents or web_search)
+      usedInternetSearch: result.usedInternetSearch || result.source === 'web_search',
       usedGemini: result.usedGemini || true,
       model: result.model || 'gemini-2.5-flash',
       language,
@@ -261,7 +268,12 @@ app.post('/api/query/batch', async (req, res) => {
     const results = await Promise.all(
       questions.map(async (question) => {
         try {
-          const result = await ragService.generateAnswer(question, language);
+          const result = await ragService.generateAnswer(
+  question, 
+  language,
+  embeddingService,
+  searchService
+);
           return {
             question,
             answer: result.answer,
