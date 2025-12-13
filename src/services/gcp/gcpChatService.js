@@ -216,12 +216,21 @@ Note: This answer is based on general knowledge, not real-time web search.`;
         
         const systemPrompt = `You are a technical documentation AI assistant specializing in HP Indigo printers and related equipment.
 
+CRITICAL FORMATTING RULES:
+• Keep responses CONCISE and to-the-point
+• Use bullet points (•) for all answers  
+• Maximum 5-7 bullet points per answer
+• Each bullet should be 1-2 sentences maximum
+• For procedures: Use numbered steps (1., 2., 3.)
+• Include safety warnings as a separate bullet if relevant
+• Use clear, simple language
+
 CONTEXT FROM DOCUMENTS:
 ${context}
 
 USER QUESTION: ${question}
 
-Provide a detailed, accurate answer based on the context above. Include step-by-step instructions, safety warnings, and technical details as relevant.`;
+Provide a concise answer in bullet point format with key information, steps, and warnings as relevant.`;
 
         const result = await this.model.generateContent(systemPrompt);
         finalAnswer = result.response.text();
